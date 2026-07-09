@@ -184,8 +184,8 @@ def send_alert(pair):
         "fields": [
             # Price & Movement
             {
-                "name": "💰 Price",
-                "value": f"{format_number(float(price) if isinstance(price, (int, float)) else 0)}",
+                "name": "💰 Market Cap",
+                "value": f"{format_number(pair.get('marketCap', 0) or 0)}",
                 "inline": True
             },
             {
