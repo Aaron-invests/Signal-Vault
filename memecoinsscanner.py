@@ -121,6 +121,22 @@ def passes_filters(pair):
             print(f"[filtered] {symbol} - volume/liquidity too low ({vol_to_liq_pct:.1%}) - suspicious")
             return False
     
+    # DEV WALLET CHECK
+    # Check if dev/owner holds majority of supply
+    top_holders = pair.get("topHolders") or []
+    if top_holders and len(top_holders) > 0:
+        top_holder_pct = top_holders[0].get("percentage", 0) or 0
+        if top_holder_pct > 30:
+            print(f"[filtered] {symbol} - top holder has {top_holder_pct:.1f}% (likely dev rug risk)")
+            return False
+    
+    # HOLDER DISTRIBUTION CHECK
+    # More distributed holders = safer (harder to rug)
+    holder_count = len(top_holders)
+    if holder_count < 50:
+        print(f"[filtered] {symbol} - only {holder_count} holders (centralized)")
+        return False
+    
     return True
 
 # ─────────────────────────────
@@ -234,6 +250,25 @@ def send_alert(pair):
         "footer": {"text": "Signal Vault Meme Scanner • Extreme risk — not financial advice, DYOR"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+    # Add social links if they exist (Telegram, Twitter/X)
+    info = pair.get("info") or {}
+    socials = info.get("socials") or []
+    social_links = []
+    for s in socials:
+        s_type = s.get("type", "").lower()
+        s_url = s.get("url", "")
+        if s_type == "telegram" and s_url:
+            social_links.append(f"[Telegram]({s_url})")
+        elif s_type in ("twitter", "x") and s_url:
+            social_links.append(f"[Twitter/X]({s_url})")
+
+    if social_links:
+        embed["fields"].append({
+            "name": "🔗 Links",
+            "value": " • ".join(social_links),
+            "inline": False
+        })
 
     payload = {
         "content": f"<@&{PREMIUM_ROLE_ID}>",
