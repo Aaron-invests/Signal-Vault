@@ -1795,4 +1795,7 @@ def main():
         else: print(Fore.RED + "  Invalid. Try again."); time.sleep(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        option1_run_bot()
+    except KeyboardInterrupt:
+        print(Fore.YELLOW + "\n  Bot stopped.\n")
