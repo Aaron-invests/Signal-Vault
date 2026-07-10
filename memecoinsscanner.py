@@ -121,17 +121,9 @@ def passes_filters(pair):
             print(f"[filtered] {symbol} - volume/liquidity too low ({vol_to_liq_pct:.1%}) - suspicious")
             return False
     
-    # DEV WALLET CHECK
-    # Check if dev/owner holds majority of supply
-    top_holders = pair.get("topHolders") or []
-    if top_holders and len(top_holders) > 0:
-        top_holder_pct = top_holders[0].get("percentage", 0) or 0
-        if top_holder_pct > 30:
-            print(f"[filtered] {symbol} - top holder has {top_holder_pct:.1f}% (likely dev rug risk)")
-            return False
-    
     # HOLDER DISTRIBUTION CHECK
     # More distributed holders = safer (harder to rug)
+    top_holders = pair.get("topHolders") or []
     holder_count = len(top_holders)
     if holder_count < 50:
         print(f"[filtered] {symbol} - only {holder_count} holders (centralized)")
