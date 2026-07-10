@@ -39,7 +39,7 @@ MIN_PRICE_CHANGE_5M = 5           # % pump in last 5 min to count as "hot"
 MAX_VOLUME_TO_LIQUIDITY_RATIO = 5  # if volume is 5x+ liquidity, likely a pump-and-dump setup
 MIN_LIQUIDITY_FOR_VOLUME = 0.2    # volume must be at least 20% of liquidity (low = suspicious)
 
-SCAN_INTERVAL_SECONDS = 300       # 5 min between scans
+SCAN_INTERVAL_SECONDS = 450       # 5 min between scans
 SEEN_FILE = "seen_tokens.json"
 
 # ─────────────────────────────
