@@ -107,14 +107,7 @@ def passes_filters(pair):
         return False
     
     # RUG CHECKS
-    # Check 1: Volume way higher than liquidity = likely pump & dump or liquidity already pulled
-    if liq > 0 and vol > 0:
-        vol_to_liq_ratio = vol / liq
-        if vol_to_liq_ratio > MAX_VOLUME_TO_LIQUIDITY_RATIO:
-            print(f"[filtered] {symbol} - volume/liquidity ratio too high ({vol_to_liq_ratio:.1f}x) - likely rug")
-            return False
-    
-    # Check 2: Volume suspiciously low relative to liquidity = low trade activity or artificial
+    # Check: Volume suspiciously low relative to liquidity = low trade activity or artificial
     if liq > 0 and vol > 0:
         vol_to_liq_pct = vol / liq
         if vol_to_liq_pct < MIN_LIQUIDITY_FOR_VOLUME:
