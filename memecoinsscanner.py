@@ -106,29 +106,6 @@ def passes_filters(pair):
     if change_5m < MIN_PRICE_CHANGE_5M:
         return False
     
-    # RUG CHECKS
-    # Check 1: Volume way higher than liquidity = likely pump & dump or liquidity already pulled
-    if liq > 0 and vol > 0:
-        vol_to_liq_ratio = vol / liq
-        if vol_to_liq_ratio > MAX_VOLUME_TO_LIQUIDITY_RATIO:
-            print(f"[filtered] {symbol} - volume/liquidity ratio too high ({vol_to_liq_ratio:.1f}x) - likely rug")
-            return False
-    
-    # Check 2: Volume suspiciously low relative to liquidity = low trade activity or artificial
-    if liq > 0 and vol > 0:
-        vol_to_liq_pct = vol / liq
-        if vol_to_liq_pct < MIN_LIQUIDITY_FOR_VOLUME:
-            print(f"[filtered] {symbol} - volume/liquidity too low ({vol_to_liq_pct:.1%}) - suspicious")
-            return False
-    
-    # HOLDER DISTRIBUTION CHECK
-    # More distributed holders = safer (harder to rug)
-    top_holders = pair.get("topHolders") or []
-    holder_count = len(top_holders)
-    if holder_count < 50:
-        print(f"[filtered] {symbol} - only {holder_count} holders (centralized)")
-        return False
-    
     return True
 
 # ─────────────────────────────
