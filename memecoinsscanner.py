@@ -39,7 +39,7 @@ MIN_PRICE_CHANGE_5M = 5           # % pump in last 5 min to count as "hot"
 MAX_VOLUME_TO_LIQUIDITY_RATIO = 5  # if volume is 5x+ liquidity, likely a pump-and-dump setup
 MIN_LIQUIDITY_FOR_VOLUME = 0.2    # volume must be at least 20% of liquidity (low = suspicious)
 
-SCAN_INTERVAL_SECONDS = 450       # 5 min between scans
+SCAN_INTERVAL_SECONDS = 300       # 5 min between scans
 SEEN_FILE = "seen_tokens.json"
 
 # ─────────────────────────────
@@ -113,14 +113,6 @@ def passes_filters(pair):
         if vol_to_liq_pct < MIN_LIQUIDITY_FOR_VOLUME:
             print(f"[filtered] {symbol} - volume/liquidity too low ({vol_to_liq_pct:.1%}) - suspicious")
             return False
-    
-    # HOLDER DISTRIBUTION CHECK
-    # More distributed holders = safer (harder to rug)
-    top_holders = pair.get("topHolders") or []
-    holder_count = len(top_holders)
-    if holder_count < 50:
-        print(f"[filtered] {symbol} - only {holder_count} holders (centralized)")
-        return False
     
     return True
 
