@@ -114,14 +114,6 @@ def passes_filters(pair):
             print(f"[filtered] {symbol} - volume/liquidity too low ({vol_to_liq_pct:.1%}) - suspicious")
             return False
     
-    # HOLDER DISTRIBUTION CHECK
-    # More distributed holders = safer (harder to rug)
-    top_holders = pair.get("topHolders") or []
-    holder_count = len(top_holders)
-    if holder_count < 10:
-        print(f"[filtered] {symbol} - only {holder_count} holders (too centralized)")
-        return False
-    
     return True
 
 # ─────────────────────────────
