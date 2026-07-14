@@ -148,6 +148,7 @@ def send_alert(pair):
     base = pair.get("baseToken", {})
     name = base.get("name", "Unknown")
     symbol = base.get("symbol", "???")
+    address = base.get("address", "?")
     price = pair.get("priceUsd", "?")
     liq = (pair.get("liquidity") or {}).get("usd", 0) or 0
     vol = (pair.get("volume") or {}).get("h24", 0) or 0
@@ -175,6 +176,12 @@ def send_alert(pair):
         "url": url,
         "color": color,
         "fields": [
+            # Contract Address
+            {
+                "name": "📄 Contract Address",
+                "value": f"`{address}`",
+                "inline": False
+            },
             # Price & Movement
             {
                 "name": "💰 Market Cap",
