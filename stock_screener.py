@@ -6,7 +6,7 @@ Posts signals (BUY/SELL/SHORT) to Discord paid tier with embeds
 Automatically runs every minute + scheduled strategy posts
 """
 
-import os, json, time, datetime, pytz, warnings
+import os, json, time, datetime, pytz, warnings, socket
 import numpy as np
 import urllib.request
 import pandas as pd
@@ -171,7 +171,19 @@ def analyze_stock(ticker):
         old_stderr = sys.stderr
         sys.stderr = StringIO()
         
-        df = yf.download(ticker, period="6mo", interval="1d", progress=False, auto_adjust=True)
+        # Ensure a single hanging ticker can never block the whole scan.
+        # Set a hard socket timeout before the network call.
+        socket.setdefaulttimeout(5)
+        try:
+            df = yf.download(ticker, period="6mo", interval="1d", progress=False, auto_adjust=True)
+        except socket.timeout:
+            sys.stderr = old_stderr
+            print(f"[TIMEOUT] {ticker} took longer than 5s to download - skipping")
+            return None
+        except Exception as e:
+            sys.stderr = old_stderr
+            print(f"[ERROR] {ticker} download failed: {e} - skipping")
+            return None
         
         sys.stderr = old_stderr
         
