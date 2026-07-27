@@ -171,10 +171,15 @@ def analyze_stock(ticker):
         old_stderr = sys.stderr
         sys.stderr = StringIO()
         
-        df = yf.download(ticker, period="6mo", interval="1d", progress=False, auto_adjust=True)
+        try:
+            df = yf.download(
+                ticker, period="6mo", interval="1d", progress=False,
+                auto_adjust=True, timeout=5
+            )
+        finally:
+            sys.stderr = old_stderr
         
-        sys.stderr = old_stderr
-        
+
         if df.empty or len(df) < 30:
             return None
         close = df["Close"].squeeze()
