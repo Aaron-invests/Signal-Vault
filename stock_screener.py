@@ -6,11 +6,12 @@ Posts signals (BUY/SELL/SHORT) to Discord paid tier with embeds
 Automatically runs every minute + scheduled strategy posts
 """
 
-import os, json, time, datetime, pytz, warnings, signal
+import os, json, time, datetime, pytz, warnings
 import numpy as np
 import urllib.request
 import pandas as pd
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -163,9 +164,6 @@ def get_targets(df, price):
 
 # ── Analyze Stock ──────────────────────────────────────────────
 
-def _timeout_handler(signum, frame):
-    raise TimeoutError("yfinance download timed out")
-
 def analyze_stock(ticker):
     try:
         import sys
@@ -176,17 +174,15 @@ def analyze_stock(ticker):
         sys.stderr = StringIO()
         
         try:
-            signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(5)  # 5 second timeout
-            try:
-                df = yf.download(
-                    ticker, period="6mo", interval="1d", progress=False,
-                    auto_adjust=True
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    yf.download, ticker, period="6mo", interval="1d",
+                    progress=False, auto_adjust=True
                 )
-            except TimeoutError:
-                return None
-            finally:
-                signal.alarm(0)  # Cancel the alarm
+                try:
+                    df = future.result(timeout=5)  # 5 second timeout
+                except FuturesTimeoutError:
+                    return None
         finally:
             sys.stderr = old_stderr
         
