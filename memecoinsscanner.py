@@ -77,6 +77,11 @@ def load_tracked_wins():
             for key in data:
                 data[key]["signal_time"] = datetime.fromisoformat(data[key]["signal_time"])
                 data[key]["ath_time"] = datetime.fromisoformat(data[key]["ath_time"])
+                # Backwards compatibility for old files without MC
+                if "entry_mc" not in data[key]:
+                    data[key]["entry_mc"] = data[key].get("entry_price", 0)
+                if "ath_mc" not in data[key]:
+                    data[key]["ath_mc"] = data[key].get("ath_price", 0)
             return data
     return {}
 
@@ -86,7 +91,9 @@ def save_tracked_wins(tracked):
         save_data[key] = {
             "symbol": val["symbol"],
             "entry_price": val["entry_price"],
+            "entry_mc": val["entry_mc"],
             "ath_price": val["ath_price"],
+            "ath_mc": val["ath_mc"],
             "signal_time": val["signal_time"].isoformat(),
             "ath_time": val["ath_time"].isoformat(),
             "posted": val["posted"]
@@ -118,7 +125,12 @@ def get_pair_data(chain_id, token_address):
         pairs = [p for p in pairs if p.get("chainId") == chain_id]
         if not pairs:
             return None
-        return max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd", 0))
+        best_pair = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd", 0))
+        
+        # Debug: Log all available fields
+        print(f"[debug] Available pair fields for token: {best_pair.keys()}")
+        
+        return best_pair
     except Exception as e:
         print(f"[error] fetching pair data for {token_address}: {e}")
         return None
@@ -162,8 +174,14 @@ def format_number(num):
         return f"${num/1_000_000:.1f}M"
     elif num >= 1_000:
         return f"${num/1_000:.1f}K"
-    else:
+    elif num >= 1:
         return f"${num:.2f}"
+    elif num >= 0.01:
+        return f"${num:.4f}"
+    elif num > 0:
+        return f"${num:.8f}"
+    else:
+        return "$0.00"
 
 def get_age_string(created_ms):
     if not created_ms:
@@ -255,18 +273,21 @@ def send_alert(pair):
     except Exception as e:
         print(f"[error] sending webhook: {e}")
 
-def send_proof_post(symbol, entry_price, exit_price, multiplier):
+def send_proof_post(symbol, entry_mc, exit_mc, multiplier):
     """Send proof to proof channel."""
-    entry_mc = format_number(entry_price)
-    exit_mc = format_number(exit_price)
+    entry_mc_str = format_number(entry_mc)
+    exit_mc_str = format_number(exit_mc)
     
     embed = {
-        "title": f"✅ WIN: {symbol}",
+        "title": f"🚀 ✅ WIN: {symbol} ✅ 🚀",
         "color": 0x00ff00,
         "fields": [
-            {"name": "💰 Multiplier", "value": f"{multiplier:.2f}X", "inline": True},
-            {"name": "📥 Entry MC", "value": entry_mc, "inline": True},
-            {"name": "📤 Exit MC", "value": exit_mc, "inline": True},
+            {"name": "━━━━━━━━━━━━━━━", "value": "━━━━━━━━━━━━━━━", "inline": False},
+            {"name": "💰 MULTIPLIER", "value": f"```\n{multiplier:.2f}X\n```", "inline": False},
+            {"name": "━━━━━━━━━━━━━━━", "value": "━━━━━━━━━━━━━━━", "inline": False},
+            {"name": "📥 ENTRY MC", "value": f"```\n{entry_mc_str}\n```", "inline": False},
+            {"name": "📤 EXIT MC", "value": f"```\n{exit_mc_str}\n```", "inline": False},
+            {"name": "━━━━━━━━━━━━━━━", "value": "━━━━━━━━━━━━━━━", "inline": False},
         ],
         "footer": {"text": "Signal Vault Proof of Results"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -390,8 +411,10 @@ def scan_once(seen, tracked_wins):
             # Add to tracked wins
             tracked_wins[key] = {
                 "symbol": symbol,
-                "entry_price": entry_price,
-                "ath_price": entry_price,
+                "entry_price": float(pair.get("priceUsd", 0)),
+                "entry_mc": float(pair.get("marketCap", 0) or 0),  # Store MC
+                "ath_price": float(pair.get("priceUsd", 0)),
+                "ath_mc": float(pair.get("marketCap", 0) or 0),  # Store MC
                 "signal_time": datetime.now(timezone.utc),
                 "ath_time": datetime.now(timezone.utc),
                 "posted": False
@@ -402,8 +425,72 @@ def scan_once(seen, tracked_wins):
 
         time.sleep(0.5)
 
-    # Check existing wins
-    tracked_wins = check_and_update_wins(tracked_wins)
+    # Check existing wins DURING scan (update ATH in real-time)
+    to_remove = []
+    for token_key, win_data in list(tracked_wins.items()):
+        if win_data["posted"]:
+            continue
+        
+        chain_id, token_address = token_key.split(":")
+        pair = get_pair_data(chain_id, token_address)
+        
+        if not pair:
+            continue
+        
+        current_price = float(pair.get("priceUsd", 0))
+        if current_price <= 0:
+            continue
+        
+        entry_price = win_data["entry_price"]
+        entry_mc = win_data["entry_mc"]
+        ath_price = win_data["ath_price"]
+        ath_mc = win_data["ath_mc"]
+        signal_time = win_data["signal_time"]
+        
+        current_mc = float(pair.get("marketCap", 0) or 0)
+        
+        # Update ATH if new high
+        if current_price > ath_price:
+            win_data["ath_price"] = current_price
+            ath_price = current_price
+            if current_mc > ath_mc:
+                win_data["ath_mc"] = current_mc
+                ath_mc = current_mc
+            win_data["ath_time"] = datetime.now(timezone.utc)
+        
+        should_post = False
+        
+        # Check 25% drop from ATH
+        drop_percent = ((ath_price - current_price) / ath_price) * 100
+        if drop_percent >= ATH_DROP_PERCENT:
+            should_post = True
+        
+        # Check 2-hour timeout
+        time_elapsed = datetime.now(timezone.utc) - signal_time
+        if time_elapsed >= timedelta(hours=WIN_TIMEOUT_HOURS):
+            should_post = True
+        
+        if should_post:
+            exit_mc = win_data["ath_mc"]
+            final_multiplier = exit_mc / entry_mc if entry_mc > 0 else 0
+            
+            # Only post if it's actually a win (2x+)
+            if final_multiplier >= MIN_MULTIPLIER:
+                send_proof_post(
+                    symbol=win_data["symbol"],
+                    entry_mc=entry_mc,
+                    exit_mc=exit_mc,
+                    multiplier=final_multiplier
+                )
+            
+            win_data["posted"] = True
+            to_remove.append(token_key)
+        
+        time.sleep(0.1)
+    
+    # Clean up posted wins
+    for key in to_remove:
+        del tracked_wins[key]
 
     return new_alerts, tracked_wins
 
