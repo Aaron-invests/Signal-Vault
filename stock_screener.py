@@ -176,7 +176,7 @@ def analyze_stock(ticker):
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
-                    yf.download, ticker, period="6mo", interval="1d",
+                    yf.download, ticker, period="3mo", interval="1d",
                     progress=False, auto_adjust=True
                 )
                 try:
