@@ -368,6 +368,10 @@ def scan_once(seen, tracked_wins):
 
         if chain_id not in CHAINS or not address:
             continue
+        
+        # Skip if address looks like a URL (bad data from DexScreener)
+        if address.startswith("http://") or address.startswith("https://"):
+            continue
 
         key = f"{chain_id}:{address}"
 
