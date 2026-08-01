@@ -753,10 +753,12 @@ def run_screener():
 # ── Start Scheduler ────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import threading
+
     print(Fore.CYAN + Style.BRIGHT + "\n" + "="*70)
     print(Fore.CYAN + Style.BRIGHT + "  STOCK SCREENER - AUTOMATED MODE")
     print(Fore.CYAN + "="*70)
-    print(Fore.WHITE + "  Running screener every minute...")
+    print(Fore.WHITE + "  Running screener every 2 minutes during market hours...")
     print(Fore.WHITE + "  Scheduled strategy posts:")
     print(Fore.WHITE + "    • 9:25 AM ET - Pre-market brief")
     print(Fore.WHITE + "    • 1:00 PM ET - Daily educational lesson")
@@ -766,11 +768,37 @@ if __name__ == "__main__":
     # Run screener immediately on startup
     run_screener()
 
-    # Create scheduler
-    scheduler = BackgroundScheduler()
+    def run_screener_loop():
+        """Background thread loop that runs the screener every 2 minutes
+        during market hours. Threading + time.sleep is used instead of
+        APScheduler cron jobs because cron scheduling can silently stop
+        firing after blocking operations (e.g. Discord webhook posts,
+        network calls) tie up the scheduler thread. A plain thread with
+        sleep intervals is simple and does not depend on clock
+        synchronization, making it far more resilient.
+        """
+        while True:
+            try:
+                now = datetime.datetime.now(ET)
+                # Only run during market hours (9:30 AM - 4:00 PM ET), Monday-Friday
+                if now.weekday() < 5 and 9 <= now.hour < 16:
+                    run_screener()
+                    time.sleep(120)  # Run every 2 minutes
+                else:
+                    # Outside market hours, check every minute if we should start
+                    time.sleep(60)
+            except Exception as e:
+                print(f"[screener loop] error: {e}", file=sys.stderr)
+                traceback.print_exc()
+                time.sleep(60)
 
-    # Screener: every 2 minutes (Monday-Friday, market hours 9:30 AM - 4:00 PM)
-    scheduler.add_job(run_screener, 'cron', day_of_week='mon-fri', hour='9-16', minute='*/2')
+    # Start the screener loop in a background daemon thread
+    screener_thread = threading.Thread(target=run_screener_loop, daemon=True)
+    screener_thread.start()
+
+    # Create scheduler for the strategy posts only (these run once a day,
+    # outside of the tight screener loop, so cron scheduling is fine here)
+    scheduler = BackgroundScheduler()
 
     # Strategy posts: weekdays only
     # Pre-market brief at 9:25 AM ET
