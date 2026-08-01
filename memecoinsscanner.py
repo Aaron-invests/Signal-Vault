@@ -127,9 +127,6 @@ def get_pair_data(chain_id, token_address):
             return None
         best_pair = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd", 0))
         
-        # Debug: Log all available fields
-        print(f"[debug] Available pair fields for token: {best_pair.keys()}")
-        
         return best_pair
     except Exception as e:
         print(f"[error] fetching pair data for {token_address}: {e}")
