@@ -223,6 +223,25 @@ def send_alert(pair):
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
+    # Add social links if they exist
+    info = pair.get("info") or {}
+    socials = info.get("socials") or []
+    social_links = []
+    for s in socials:
+        s_type = s.get("type", "").lower()
+        s_url = s.get("url", "")
+        if s_type == "telegram" and s_url:
+            social_links.append(f"[Telegram]({s_url})")
+        elif s_type in ("twitter", "x") and s_url:
+            social_links.append(f"[Twitter/X]({s_url})")
+
+    if social_links:
+        embed["fields"].append({
+            "name": "🔗 Links",
+            "value": " • ".join(social_links),
+            "inline": False
+        })
+
     payload = {
         "content": f"<@&{PREMIUM_ROLE_ID}>",
         "embeds": [embed],
