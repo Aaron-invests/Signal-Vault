@@ -208,15 +208,18 @@ def send_alert(pair):
         "url": url,
         "color": color,
         "fields": [
-            {"name": "📄 Contract", "value": f"`{address[:20]}...`", "inline": False},
+            {"name": "📄 Contract Address", "value": f"`{address}`", "inline": False},
             {"name": "💰 Market Cap", "value": format_number(pair.get('marketCap', 0) or 0), "inline": True},
             {"name": "📊 5m Pump", "value": f"{change_5m:+.1f}% {'🔥' if change_5m >= 10 else ''}", "inline": True},
             {"name": "⏱ Age", "value": age, "inline": True},
             {"name": "💧 Liquidity", "value": format_number(liq), "inline": True},
-            {"name": "📈 24h Vol", "value": format_number(vol), "inline": True},
+            {"name": "📈 24h Volume", "value": format_number(vol), "inline": True},
             {"name": "💹 Vol/Liq", "value": f"{vol_to_liq:.2f}x", "inline": True},
+            {"name": "1h Change", "value": f"{change_1h:+.1f}%", "inline": True},
+            {"name": "6h Change", "value": f"{change_6h:+.1f}%", "inline": True},
+            {"name": "24h Change", "value": f"{change_24h:+.1f}%", "inline": True},
         ],
-        "footer": {"text": "Signal Vault • DYOR"},
+        "footer": {"text": "Signal Vault Meme Scanner • Extreme risk — not financial advice, DYOR"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
