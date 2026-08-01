@@ -276,15 +276,13 @@ def send_proof_post(symbol, entry_mc, exit_mc, multiplier):
     exit_mc_str = format_number(exit_mc)
     
     embed = {
-        "title": f"🚀 ✅ WIN: {symbol} ✅ 🚀",
+        "title": f"✅ WIN: {symbol}",
         "color": 0x00ff00,
         "fields": [
-            {"name": "━━━━━━━━━━━━━━━", "value": "━━━━━━━━━━━━━━━", "inline": False},
-            {"name": "💰 MULTIPLIER", "value": f"```\n{multiplier:.2f}X\n```", "inline": False},
-            {"name": "━━━━━━━━━━━━━━━", "value": "━━━━━━━━━━━━━━━", "inline": False},
-            {"name": "📥 ENTRY MC", "value": f"```\n{entry_mc_str}\n```", "inline": False},
-            {"name": "📤 EXIT MC", "value": f"```\n{exit_mc_str}\n```", "inline": False},
-            {"name": "━━━━━━━━━━━━━━━", "value": "━━━━━━━━━━━━━━━", "inline": False},
+            {"name": "Multiplier", "value": f"**{multiplier:.2f}X**", "inline": False},
+            {"name": "─────────────", "value": "─────────────", "inline": False},
+            {"name": "Entry MC", "value": f"**{entry_mc_str}**", "inline": False},
+            {"name": "Exit MC", "value": f"**{exit_mc_str}**", "inline": False},
         ],
         "footer": {"text": "Signal Vault Proof of Results"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
