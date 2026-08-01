@@ -6,7 +6,7 @@ Posts signals (BUY/SELL/SHORT) to Discord paid tier with embeds
 Automatically runs every minute + scheduled strategy posts
 """
 
-import os, json, time, datetime, pytz, warnings
+import os, json, time, datetime, pytz, warnings, sys, traceback
 import numpy as np
 import urllib.request
 import pandas as pd
@@ -662,82 +662,93 @@ Share your targets. We trade together. Build the list as a community. 🎯
 
 def run_screener():
     """Run screener and post only NEW signals to Discord"""
-    os.system("cls")
-    print(Fore.CYAN + Style.BRIGHT + "\n" + "="*70)
-    print(Fore.CYAN + Style.BRIGHT + "  STOCK SCREENER -- TOP 100 MOST TRADED (AUTOMATED)")
-    print(Fore.CYAN + "="*70 + "\n")
+    try:
+        os.system("cls")
+        print(Fore.CYAN + Style.BRIGHT + "\n" + "="*70)
+        print(Fore.CYAN + Style.BRIGHT + "  STOCK SCREENER -- TOP 100 MOST TRADED (AUTOMATED)")
+        print(Fore.CYAN + "="*70 + "\n")
 
-    stocks  = get_top_100_stocks()
-    results = []
+        stocks  = get_top_100_stocks()
+        results = []
 
-    print(Fore.WHITE + f"Scanning {len(stocks)} stocks...")
-    print(Fore.WHITE + "This may take 2-3 minutes...\n")
+        print(Fore.WHITE + f"Scanning {len(stocks)} stocks...")
+        print(Fore.WHITE + "This may take 2-3 minutes...\n")
 
-    for i, ticker in enumerate(stocks, 1):
-        print(Fore.CYAN + f"  [{i:3d}/{len(stocks)}] {ticker:<6}", end=" -> ", flush=True)
-        r = analyze_stock(ticker)
-        if r and r.get("action") in ALL_ACT:
-            results.append(r)
-            print(Fore.GREEN + f"{r['action']} ({r['conf_score']})")
-        elif r:
-            print(Fore.YELLOW + "no signal")
+        for i, ticker in enumerate(stocks, 1):
+            print(Fore.CYAN + f"  [{i:3d}/{len(stocks)}] {ticker:<6}", end=" -> ", flush=True)
+            r = analyze_stock(ticker)
+            if r and r.get("action") in ALL_ACT:
+                results.append(r)
+                print(Fore.GREEN + f"{r['action']} ({r['conf_score']})")
+            elif r:
+                print(Fore.YELLOW + "no signal")
+            else:
+                print(Fore.YELLOW + "skipped")
+            time.sleep(0.2)
+
+        results.sort(key=lambda x: x["conf_score"], reverse=True)
+        save_results(results)
+
+        print(Fore.CYAN + "\n" + "="*70)
+        print(Fore.GREEN + f"\n  Found {len(results)} signals")
+        print(Fore.WHITE + f"  Saved to: stock_screener_results.json\n")
+
+        if results:
+            print(Fore.CYAN + Style.BRIGHT + "  TOP SIGNALS BY CONFIDENCE")
+            print(Fore.CYAN + "-"*70)
+            for r in results[:15]:
+                action_color = Fore.GREEN if r["action"] in ACT_BUY_SIGS else Fore.RED
+                print(Fore.WHITE + f"  {r['ticker']:<6} ${r['price']:<8.2f}  {r['pct']:+6.2f}%  RSI:{r['rsi']:>5.1f}  "
+                      + action_color + f"{r['action']:<16}" + Fore.WHITE + f"({r['conf_score']})")
+                print(Fore.WHITE + f"       -> {r['reason']}")
+                if r.get("target"):
+                    print(Fore.WHITE + f"       Target: ${r['target']:.2f}  Stop: ${r['stop_loss']:.2f}  R/R: {r['rr']:.1f}x")
+                print()
+
+            print(Fore.CYAN + "-"*70)
+            print(Fore.WHITE + f"\n  Posting new signals to Discord...\n")
+
+            try:
+                # Post only NEW signals to Discord stock signals channel
+                posted = 0
+                for r in results:
+                    if not signal_already_sent(r["ticker"], r["action"]):
+                        print(Fore.CYAN + f"  Sending {r['ticker']}...", end=" ", flush=True)
+                        ok = post_to_discord_embed(
+                            ticker=r["ticker"],
+                            action=r["action"],
+                            price=r["price"],
+                            pct=r["pct"],
+                            rsi_val=r["rsi"],
+                            confidence=r["conf_score"],
+                            reason=r["reason"],
+                            target=r.get("target"),
+                            stop_loss=r.get("stop_loss"),
+                            rr=r.get("rr"),
+                        )
+                        if ok:
+                            mark_signal_sent(r["ticker"], r["action"])
+                            print(Fore.GREEN + "sent!")
+                            posted += 1
+                        time.sleep(2)
+
+                if posted > 0:
+                    print(Fore.GREEN + Style.BRIGHT + f"\n  {posted} new signal(s) posted to Discord.")
+                else:
+                    print(Fore.YELLOW + f"\n  No new signals to post (already sent).")
+            except Exception as e:
+                print(f"ERROR posting to Discord: {e}", file=sys.stderr)
+                traceback.print_exc()
+                # Continue anyway
         else:
-            print(Fore.YELLOW + "skipped")
-        time.sleep(0.2)
+            print(Fore.YELLOW + "  No signals found this scan.")
 
-    results.sort(key=lambda x: x["conf_score"], reverse=True)
-    save_results(results)
+        print(Fore.CYAN + "="*70 + "\n")
+    except Exception as e:
+        print(f"ERROR in run_screener: {e}", file=sys.stderr)
+        traceback.print_exc()
+        # Continue running even if scan fails
 
-    print(Fore.CYAN + "\n" + "="*70)
-    print(Fore.GREEN + f"\n  Found {len(results)} signals")
-    print(Fore.WHITE + f"  Saved to: stock_screener_results.json\n")
-
-    if results:
-        print(Fore.CYAN + Style.BRIGHT + "  TOP SIGNALS BY CONFIDENCE")
-        print(Fore.CYAN + "-"*70)
-        for r in results[:15]:
-            action_color = Fore.GREEN if r["action"] in ACT_BUY_SIGS else Fore.RED
-            print(Fore.WHITE + f"  {r['ticker']:<6} ${r['price']:<8.2f}  {r['pct']:+6.2f}%  RSI:{r['rsi']:>5.1f}  "
-                  + action_color + f"{r['action']:<16}" + Fore.WHITE + f"({r['conf_score']})")
-            print(Fore.WHITE + f"       -> {r['reason']}")
-            if r.get("target"):
-                print(Fore.WHITE + f"       Target: ${r['target']:.2f}  Stop: ${r['stop_loss']:.2f}  R/R: {r['rr']:.1f}x")
-            print()
-
-        print(Fore.CYAN + "-"*70)
-        print(Fore.WHITE + f"\n  Posting new signals to Discord...\n")
-        
-        # Post only NEW signals to Discord stock signals channel
-        posted = 0
-        for r in results:
-            if not signal_already_sent(r["ticker"], r["action"]):
-                print(Fore.CYAN + f"  Sending {r['ticker']}...", end=" ", flush=True)
-                ok = post_to_discord_embed(
-                    ticker=r["ticker"],
-                    action=r["action"],
-                    price=r["price"],
-                    pct=r["pct"],
-                    rsi_val=r["rsi"],
-                    confidence=r["conf_score"],
-                    reason=r["reason"],
-                    target=r.get("target"),
-                    stop_loss=r.get("stop_loss"),
-                    rr=r.get("rr"),
-                )
-                if ok:
-                    mark_signal_sent(r["ticker"], r["action"])
-                    print(Fore.GREEN + "sent!")
-                    posted += 1
-                time.sleep(2)
-
-        if posted > 0:
-            print(Fore.GREEN + Style.BRIGHT + f"\n  {posted} new signal(s) posted to Discord.")
-        else:
-            print(Fore.YELLOW + f"\n  No new signals to post (already sent).")
-    else:
-        print(Fore.YELLOW + "  No signals found this scan.")
-
-    print(Fore.CYAN + "="*70 + "\n")
 
 # ── Start Scheduler ────────────────────────────────────────────
 
@@ -751,31 +762,36 @@ if __name__ == "__main__":
     print(Fore.WHITE + "    • 1:00 PM ET - Daily educational lesson")
     print(Fore.WHITE + "    • 3:00 PM ET - Discussion prompt")
     print(Fore.CYAN + "="*70 + "\n")
-    
+
     # Run screener immediately on startup
     run_screener()
-    
+
     # Create scheduler
     scheduler = BackgroundScheduler()
-    
+
     # Screener: every minute (Monday-Friday, market hours 9:30 AM - 4:00 PM)
     scheduler.add_job(run_screener, 'cron', day_of_week='mon-fri', hour='9-16', minute='*/1')
-    
+
     # Strategy posts: weekdays only
     # Pre-market brief at 9:25 AM ET
     scheduler.add_job(post_market_context, 'cron', day_of_week='mon-fri', hour='9', minute='25')
-    
+
     # Educational post at 1:00 PM ET (mid-day, rotating through 5 setups)
     scheduler.add_job(post_educational, 'cron', day_of_week='mon-fri', hour='13', minute='0')
-    
+
     # Discussion prompt at 3:00 PM ET (end of day, rotating prompts)
     scheduler.add_job(post_discussion_prompt, 'cron', day_of_week='mon-fri', hour='15', minute='0')
-    
-    scheduler.start()
-    
+
     try:
+        scheduler.start()
+        print("Scheduler started successfully")
+        scheduler.daemon = False
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        print("Scheduler stopped by user")
         scheduler.shutdown()
-        print(Fore.YELLOW + "\nScreener stopped.")
+    except Exception as e:
+        print(f"FATAL ERROR: {e}", file=sys.stderr)
+        traceback.print_exc()
+        scheduler.shutdown()
