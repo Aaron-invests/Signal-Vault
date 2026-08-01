@@ -769,8 +769,8 @@ if __name__ == "__main__":
     # Create scheduler
     scheduler = BackgroundScheduler()
 
-    # Screener: every minute (Monday-Friday, market hours 9:30 AM - 4:00 PM)
-    scheduler.add_job(run_screener, 'cron', day_of_week='mon-fri', hour='9-16', minute='*/1')
+    # Screener: every 2 minutes (Monday-Friday, market hours 9:30 AM - 4:00 PM)
+    scheduler.add_job(run_screener, 'cron', day_of_week='mon-fri', hour='9-16', minute='*/2')
 
     # Strategy posts: weekdays only
     # Pre-market brief at 9:25 AM ET
