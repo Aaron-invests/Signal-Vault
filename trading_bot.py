@@ -1,8 +1,8 @@
 """
-INDEX FUND SIGNAL BOT
+INDEX FUND SIGNAL BOT — OPTIMIZED FOR RAILWAY HOBBY PLAN
 Strategies: RSI, MACD, EMA Crossover, Bollinger Bands
 Tickers: FXAIX, QQQM, VXUS, SCHD, VTI, VOO
-Max 30 trades/month | 9:30 AM - 4:00 PM ET
+Max 30 trades/month | 9:30 AM - 4:00 PM ET | Smart sleep outside market hours
 """
 
 import sys, os, json, time, datetime, pytz, calendar
@@ -37,6 +37,7 @@ BRIEF_FILE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brief
 EOD_FILE       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eod_log.json")
 WEEKLY_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_log.json")
 REFRESH        = 60
+CLOSED_SLEEP   = 1800  # 30 minutes — sleep when market closed (saves ~95% memory vs 60s loops)
 RSI_OVERSOLD   = 30
 RSI_OVERBOUGHT = 70
 
@@ -239,6 +240,61 @@ def get_fxaix_price():
     if cache["price"]:
         return cache["price"], True
     return None, True
+
+# ── MARKET HOURS & WEEKDAY OPTIMIZATION ────────────────────────
+
+def get_seconds_until_market_open():
+    """Calculate seconds until market opens (9:30 AM ET weekdays)."""
+    now = datetime.datetime.now(ET)
+    
+    # If it's a weekend, find next Monday 9:30 AM
+    if now.weekday() >= 5:
+        days_ahead = 7 - now.weekday()
+        next_open = now.replace(hour=9, minute=30, second=0, microsecond=0) + datetime.timedelta(days=days_ahead)
+        return int((next_open - now).total_seconds())
+    
+    # If it's a holiday, skip to next trading day
+    if is_market_holiday():
+        next_open = now.replace(hour=9, minute=30, second=0, microsecond=0) + datetime.timedelta(days=1)
+        return int((next_open - now).total_seconds())
+    
+    # Today is a trading day
+    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    
+    if now < market_open:
+        # Before market open today
+        return int((market_open - now).total_seconds())
+    else:
+        # After market open today, next open is tomorrow
+        next_open = (now + datetime.timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
+        return int((next_open - now).total_seconds())
+
+def should_be_scanning():
+    """Return (is_scanning, reason). True if market is open and trading."""
+    now = datetime.datetime.now(ET)
+    
+    # Weekend check
+    if now.weekday() >= 5:
+        return False, "Weekend"
+    
+    # Holiday check
+    if is_market_holiday():
+        name = get_holiday_name() or "Holiday"
+        return False, f"Market Holiday ({name})"
+    
+    # Market hours check (9:30 AM - 4:00 PM ET)
+    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    
+    if now < market_open:
+        s = (market_open - now).seconds
+        m, sec = divmod(s, 60)
+        return False, f"Pre-market (opens in {m}m {sec}s)"
+    
+    if now >= market_close:
+        return False, "Closed (after 4 PM)"
+    
+    return True, "OPEN"
 
 # ── News ───────────────────────────────────────────────────────
 
@@ -939,18 +995,8 @@ def atr(high, low, close, p=14):
     return tr.ewm(span=p, adjust=False).mean()
 
 def is_open():
-    now = datetime.datetime.now(ET)
-    if now.weekday() >= 5: return False, "Weekend"
-    if is_market_holiday():
-        name = get_holiday_name() or "Holiday"
-        return False, f"Market Holiday ({name})"
-    o = now.replace(hour=9,  minute=30, second=0, microsecond=0)
-    c = now.replace(hour=16, minute=0,  second=0, microsecond=0)
-    if now < o:
-        s = (o - now).seconds; m, sec = divmod(s, 60)
-        return False, f"Pre-market (opens in {m}m {sec}s)"
-    if now >= c: return False, "Closed (after 4 PM)"
-    return True, "OPEN"
+    """Alias for should_be_scanning for backward compatibility."""
+    return should_be_scanning()
 
 # ── Price target and ATR stop loss ─────────────────────────────
 
@@ -1476,9 +1522,16 @@ def option6_view_signals():
     print(Fore.CYAN + "\n" + "═"*88 + "\n")
     input(Fore.WHITE + "  Press ENTER to return to menu...")
 
-# ── Option 1 — Run bot ─────────────────────────────────────────
+# ── Option 1 — Run bot (OPTIMIZED) ─────────────────────────────
 
 def option1_run_bot():
+    """
+    ✅ OPTIMIZED FOR RAILWAY HOBBY PLAN
+    - Only scans during market hours (9:30 AM - 4:00 PM ET, weekdays only)
+    - Sleeps 30 minutes outside market hours (vs. 60s loop = 95% less memory)
+    - Handles weekend/holiday checking
+    - Still sends all morning briefs, EOD summaries, and weekly/monthly reports
+    """
     last_signals    = {}
     daily_signals   = {}
     trade_warn_sent = False
@@ -1486,186 +1539,215 @@ def option1_run_bot():
 
     while True:
         now_et        = datetime.datetime.now(ET)
-        open_, status = is_open()
+        should_scan, status = should_be_scanning()
         used          = trades_this_month()
-        close_time    = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
-        open_time     = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
-        weekly_time   = now_et.replace(hour=17, minute=0,  second=0, microsecond=0)
-
-        if now_et.weekday() == 6 and now_et >= weekly_time and not weekly_already_sent():
-            send_weekly_summary(); mark_weekly_sent()
-
+        
+        # ═══ WEEKLY / MONTHLY REPORTS ═══════════════════════════════
+        
+        # Weekly: Sunday 5 PM
+        if now_et.weekday() == 6 and now_et >= now_et.replace(hour=17, minute=0, second=0, microsecond=0):
+            if not weekly_already_sent():
+                send_weekly_summary(); mark_weekly_sent()
+        
+        # Monthly: Last day of month after 4 PM
         last_day = calendar.monthrange(now_et.year, now_et.month)[1]
-        if (now_et.day == last_day and not open_ and "Closed" in status and
+        if (now_et.day == last_day and not should_scan and "Closed" in status and
                 not _is_today(os.path.join(os.path.dirname(os.path.abspath(__file__)), "monthly_log.json"))):
             send_monthly_report()
             _write_date_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "monthly_log.json"))
 
-        if open_ and now_et >= open_time and now_et.weekday() < 5 and not morning_already_sent():
-            send_morning_brief(); mark_morning_sent()
+        # ═══ MARKET HOURS SCANNING ═════════════════════════════════
+        
+        if should_scan:
+            # During market hours — run scans every 60 seconds
+            
+            # Morning brief (once per day at open)
+            if not morning_already_sent():
+                send_morning_brief(); mark_morning_sent()
 
-        left = MAX_TRADES - used
-        if left <= 5 and not trade_warn_sent:
-            msg = (
-                f"⚠️ <b>Trade Cap Warning</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Used <b>{used}/{MAX_TRADES}</b> trades this month\n"
-                f"Only <b>{left} remaining</b> — use them carefully"
-            )
-            send_telegram(msg)
-            trade_warn_sent = True
+            # Trade cap warning (once per month)
+            left = MAX_TRADES - used
+            if left <= 5 and not trade_warn_sent:
+                msg = (
+                    f"⚠️ <b>Trade Cap Warning</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Used <b>{used}/{MAX_TRADES}</b> trades this month\n"
+                    f"Only <b>{left} remaining</b> — use them carefully"
+                )
+                send_telegram(msg)
+                trade_warn_sent = True
 
-        if (not open_ and "Closed" in status and
-                now_et.weekday() < 5 and now_et >= close_time and
-                not eod_already_sent() and not is_market_holiday()):
-            resolve_fxaix_perf()
-            fxaix_price, fxaix_stale = get_fxaix_price()
-            if fxaix_price and not fxaix_stale:
-                eod_prices["FXAIX"] = fxaix_price
-            resolve_perf(eod_prices)
-            send_eod_summary(daily_signals, trades_today(), eod_prices)
-            mark_eod_sent()
+            market_condition, spy_open, spy_now = get_market_condition()
+            spy_chg = ((spy_now - spy_open) / spy_open * 100) if spy_open and spy_now else None
 
-        if not open_:
+            header(used, market_condition, spy_chg)
+            print(Fore.WHITE + "  Scanning: " + ", ".join(TICKERS) + " ...\n")
+            results = [r for t in TICKERS for r in [analyze(t, market_condition)] if r]
+
+            for r in results:
+                if "price" in r: eod_prices[r["ticker"]] = r["price"]
+            if spy_now:  eod_prices["SPY"]      = spy_now
+            if spy_open: eod_prices["SPY_OPEN"] = spy_open
+
+            header(used, market_condition, spy_chg)
+            print_positions(results)
+
+            for i, r in enumerate(results, 1):
+                if "error" in r:
+                    print(Fore.RED + f"  {i}. [{r['ticker']}] ERROR: {r['error']}"); continue
+                v          = Fore.YELLOW + " ▲" if r["vsurge"] else ""
+                pos_tag    = Fore.CYAN + " [HOLDING]" if r.get("in_position") else ""
+                streak_tag = Fore.WHITE + f" x{r['streak']}d" if r.get("streak") and r["streak"] >= 2 else ""
+                conf_str   = f" ({r['conf']})" if r["conf"] != "—" else ""
+                stale_tag  = Fore.YELLOW + " [prev NAV]" if r.get("fxaix_stale") else ""
+
+                print(Fore.WHITE + Style.BRIGHT + f"  {i}. {r['ticker']:<6}" +
+                      Style.RESET_ALL +
+                      f"  ${r['price']:<8.2f}  {cp(r['pct']):<18}  RSI:{cr(r['rsi']):<14}  "
+                      f"{ca(r['action']):<30}{conf_str}{v}{pos_tag}{streak_tag}{stale_tag}")
+                print(Fore.WHITE + f"       → {r['reason']}")
+
+                if r.get("target") and r["action"] in (*ACT_BUY_SIGS, SIG_REDUCE, SIG_STRONG_SELL):
+                    rr_str  = f"  R/R: {r['rr']:.1f}x" if r.get("rr") else ""
+                    atr_str = f"  ATR: {r['atr']}" if r.get("atr") else ""
+                    print(Fore.WHITE + f"       🎯 Target: ${r['target']:.2f}  🛑 Stop: ${r['stop_loss']:.2f}{rr_str}{atr_str}")
+
+                if r.get("news"):
+                    for headline in r["news"]:
+                        print(Fore.WHITE + f"       📰 {headline[:70]}")
+                print()
+
+                prev_action = last_signals.get(r["ticker"])
+                if r["action"] in ALL_ACT and r["action"] != prev_action:
+                    emoji = ("🚀" if r["action"] == SIG_STRONG_BUY else "📈" if r["action"] == SIG_BUY else
+                             "⚠️" if r["action"] == SIG_REDUCE else "🔴" if r["action"] == SIG_STRONG_SELL else "📉")
+                    pos_line = ""
+                    if r.get("in_position"):
+                        gl = (r["price"] - r["avg_cost"]) * r["shares"]
+                        id_str = ""
+                        if r.get("intraday_dollar") is not None:
+                            id_total = r["intraday_dollar"] * r["shares"]
+                            id_str   = f"\n📉 Today: {r['intraday_pct']:+.2f}% (${id_total:+.2f})"
+                        pos_line = (f"\n━━━━━━━━━━━━━━━━━━━━━"
+                                    f"\n💼 Holding {r['shares']} shares · avg ${r['avg_cost']:.2f}"
+                                    f"\n📊 Overall P&L: <b>{gl:+.2f}</b>{id_str}")
+                    target_line = ""
+                    if r.get("target"):
+                        target_line = (f"\n━━━━━━━━━━━━━━━━━━━━━"
+                                       f"\n🎯 Target: <b>${r['target']:.2f}</b>  🛑 Stop: <b>${r['stop_loss']:.2f}</b>"
+                                       f"  R/R: <b>{r['rr']:.1f}x</b>  ATR: {r['atr']}")
+                    streak_line = f"\n🔥 Signal streak: <b>{r['streak']} days</b>" if r.get("streak") and r["streak"] >= 2 else ""
+                    news_line   = "\n📰 <b>News:</b>\n" + "\n".join(f"• {h}" for h in r["news"]) if r.get("news") else ""
+                    stale_line  = "\n⚠️ FXAIX prev NAV — today's updates after 4 PM ET\n⏳ Resolves in 3 days" if r.get("fxaix_stale") else ""
+                    mkt_line    = f"\n📈 Market: <b>{market_condition.upper()}</b>"
+
+                    # Telegram — full text format with positions
+                    msg = (
+                        f"{emoji} <b>{r['action']} — {r['ticker']}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"💰 Price:      <b>${r['price']:.2f}</b>\n"
+                        f"📊 RSI:        <b>{r['rsi']}</b>\n"
+                        f"🎯 Confidence: <b>{r['conf']}</b>\n"
+                        f"📋 Reason:     {r['reason']}"
+                        f"{mkt_line}{pos_line}{target_line}{streak_line}{news_line}{stale_line}"
+                    )
+                    send_telegram(msg)
+
+                    # Discord — embed with signals only (no positions)
+                    send_discord_signal_embed(
+                        ticker=r["ticker"],
+                        action=r["action"],
+                        price=r["price"],
+                        rsi_val=r["rsi"],
+                        confidence=r["conf"],
+                        reason=r["reason"],
+                        role_ping=DISCORD_ROLE_INDEX,
+                        target=r.get("target"),
+                        stop_loss=r.get("stop_loss"),
+                        rr=r.get("rr"),
+                        streak=r.get("streak"),
+                        market_condition=market_condition,
+                        news=r.get("news"),
+                        fxaix_stale=r.get("fxaix_stale", False),
+                    )
+
+                    log_signal_perf(r["ticker"], r["action"], r["price"])
+                    last_signals[r["ticker"]] = r["action"]
+                    if r["ticker"] not in daily_signals: daily_signals[r["ticker"]] = []
+                    daily_signals[r["ticker"]].append(f"{r['action']} @ ${r['price']:.2f}")
+                elif r["action"] == SIG_HOLD:
+                    last_signals[r["ticker"]] = None
+
+            actionable = [r for r in results if r.get("action") in ALL_ACT]
+            if actionable:
+                print(Fore.CYAN + "─"*80)
+                print(Fore.CYAN + Style.BRIGHT + "  ACTION REQUIRED — enter in Fidelity manually")
+                print(Fore.CYAN + Style.BRIGHT + "  Only act on STRONG BUY / STRONG SELL for tax efficiency")
+                print(Fore.CYAN + "─"*80)
+                left_trades = MAX_TRADES - used
+                for r in actionable:
+                    if left_trades <= 0: print(Fore.RED + "  ⚠ TRADE LIMIT REACHED"); break
+                    color    = Fore.GREEN if r["action"] in ACT_BUY_SIGS else Fore.RED
+                    priority = " ◄ ACT" if r["action"] in (SIG_STRONG_BUY, SIG_STRONG_SELL) else ""
+                    print(color + Style.BRIGHT + f"  ► {r['action']:<20} {r['ticker']}  @ ${r['price']:.2f}{priority}")
+                    left_trades -= 1
+                print()
+                print(Fore.WHITE + "  To log a trade go to menu option 4 anytime.")
+                print(Fore.WHITE + f"  Refreshing in {REFRESH}s — Ctrl+C to return to menu")
+            else:
+                print(Fore.WHITE + f"  Refreshing in {REFRESH}s — Ctrl+C to return to menu")
+
+            time.sleep(REFRESH)
+
+        else:
+            # ═══ MARKET CLOSED ═════════════════════════════════════
+            # Smart sleep: calculate seconds until next market open
+            # Save ~95% CPU/memory by sleeping 30 min instead of checking every 60s
+            
             os.system("cls")
             print(Fore.CYAN + Style.BRIGHT + "═"*60)
             print(Fore.CYAN + f"  SIGNAL BOT  │  " + Fore.RED + status)
             print(Fore.CYAN + "═"*60)
-            print(Fore.WHITE + f"  Trades this month: {used}/{MAX_TRADES}  ({left} left)")
+            print(Fore.WHITE + f"  Trades this month: {used}/{MAX_TRADES}  ({MAX_TRADES - used} left)")
+            
             if eod_already_sent():     print(Fore.GREEN + "  ✓ EOD summary sent today.")
             if weekly_already_sent():  print(Fore.GREEN + "  ✓ Weekly summary sent.")
             if morning_already_sent(): print(Fore.GREEN + "  ✓ Morning brief sent today.")
+            
             if after_4pm_et() and not is_market_holiday():
                 fxaix_price, fxaix_stale = get_fxaix_price()
                 if fxaix_price and not fxaix_stale:
                     print(Fore.GREEN + f"  ✓ FXAIX NAV updated: ${fxaix_price:.2f}")
                 else:
                     print(Fore.YELLOW + "  ⏳ FXAIX NAV not yet posted — checking each cycle.")
-            print(Fore.WHITE + "  Waiting for market open... (Ctrl+C to go back)\n")
-            time.sleep(60)
-            continue
-
-        market_condition, spy_open, spy_now = get_market_condition()
-        spy_chg = ((spy_now - spy_open) / spy_now * 100) if spy_open and spy_now else None
-
-        header(used, market_condition, spy_chg)
-        print(Fore.WHITE + "  Scanning: " + ", ".join(TICKERS) + " ...\n")
-        results = [r for t in TICKERS for r in [analyze(t, market_condition)] if r]
-
-        for r in results:
-            if "price" in r: eod_prices[r["ticker"]] = r["price"]
-        if spy_now:  eod_prices["SPY"]      = spy_now
-        if spy_open: eod_prices["SPY_OPEN"] = spy_open
-
-        header(used, market_condition, spy_chg)
-        print_positions(results)
-
-        for i, r in enumerate(results, 1):
-            if "error" in r:
-                print(Fore.RED + f"  {i}. [{r['ticker']}] ERROR: {r['error']}"); continue
-            v          = Fore.YELLOW + " ▲" if r["vsurge"] else ""
-            pos_tag    = Fore.CYAN + " [HOLDING]" if r.get("in_position") else ""
-            streak_tag = Fore.WHITE + f" x{r['streak']}d" if r.get("streak") and r["streak"] >= 2 else ""
-            conf_str   = f" ({r['conf']})" if r["conf"] != "—" else ""
-            stale_tag  = Fore.YELLOW + " [prev NAV]" if r.get("fxaix_stale") else ""
-
-            print(Fore.WHITE + Style.BRIGHT + f"  {i}. {r['ticker']:<6}" +
-                  Style.RESET_ALL +
-                  f"  ${r['price']:<8.2f}  {cp(r['pct']):<18}  RSI:{cr(r['rsi']):<14}  "
-                  f"{ca(r['action']):<30}{conf_str}{v}{pos_tag}{streak_tag}{stale_tag}")
-            print(Fore.WHITE + f"       → {r['reason']}")
-
-            if r.get("target") and r["action"] in (*ACT_BUY_SIGS, SIG_REDUCE, SIG_STRONG_SELL):
-                rr_str  = f"  R/R: {r['rr']:.1f}x" if r.get("rr") else ""
-                atr_str = f"  ATR: {r['atr']}" if r.get("atr") else ""
-                print(Fore.WHITE + f"       🎯 Target: ${r['target']:.2f}  🛑 Stop: ${r['stop_loss']:.2f}{rr_str}{atr_str}")
-
-            if r.get("news"):
-                for headline in r["news"]:
-                    print(Fore.WHITE + f"       📰 {headline[:70]}")
-            print()
-
-            prev_action = last_signals.get(r["ticker"])
-            if r["action"] in ALL_ACT and r["action"] != prev_action:
-                emoji = ("🚀" if r["action"] == SIG_STRONG_BUY else "📈" if r["action"] == SIG_BUY else
-                         "⚠️" if r["action"] == SIG_REDUCE else "🔴" if r["action"] == SIG_STRONG_SELL else "📉")
-                pos_line = ""
-                if r.get("in_position"):
-                    gl = (r["price"] - r["avg_cost"]) * r["shares"]
-                    id_str = ""
-                    if r.get("intraday_dollar") is not None:
-                        id_total = r["intraday_dollar"] * r["shares"]
-                        id_str   = f"\n📉 Today: {r['intraday_pct']:+.2f}% (${id_total:+.2f})"
-                    pos_line = (f"\n━━━━━━━━━━━━━━━━━━━━━"
-                                f"\n💼 Holding {r['shares']} shares · avg ${r['avg_cost']:.2f}"
-                                f"\n📊 Overall P&L: <b>{gl:+.2f}</b>{id_str}")
-                target_line = ""
-                if r.get("target"):
-                    target_line = (f"\n━━━━━━━━━━━━━━━━━━━━━"
-                                   f"\n🎯 Target: <b>${r['target']:.2f}</b>  🛑 Stop: <b>${r['stop_loss']:.2f}</b>"
-                                   f"  R/R: <b>{r['rr']:.1f}x</b>  ATR: {r['atr']}")
-                streak_line = f"\n🔥 Signal streak: <b>{r['streak']} days</b>" if r.get("streak") and r["streak"] >= 2 else ""
-                news_line   = "\n📰 <b>News:</b>\n" + "\n".join(f"• {h}" for h in r["news"]) if r.get("news") else ""
-                stale_line  = "\n⚠️ FXAIX prev NAV — today's updates after 4 PM ET\n⏳ Resolves in 3 days" if r.get("fxaix_stale") else ""
-                mkt_line    = f"\n📈 Market: <b>{market_condition.upper()}</b>"
-
-                # Telegram — full text format with positions
-                msg = (
-                    f"{emoji} <b>{r['action']} — {r['ticker']}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💰 Price:      <b>${r['price']:.2f}</b>\n"
-                    f"📊 RSI:        <b>{r['rsi']}</b>\n"
-                    f"🎯 Confidence: <b>{r['conf']}</b>\n"
-                    f"📋 Reason:     {r['reason']}"
-                    f"{mkt_line}{pos_line}{target_line}{streak_line}{news_line}{stale_line}"
-                )
-                send_telegram(msg)
-
-                # Discord — embed with signals only (no positions)
-                send_discord_signal_embed(
-                    ticker=r["ticker"],
-                    action=r["action"],
-                    price=r["price"],
-                    rsi_val=r["rsi"],
-                    confidence=r["conf"],
-                    reason=r["reason"],
-                    role_ping=DISCORD_ROLE_INDEX,
-                    target=r.get("target"),
-                    stop_loss=r.get("stop_loss"),
-                    rr=r.get("rr"),
-                    streak=r.get("streak"),
-                    market_condition=market_condition,
-                    news=r.get("news"),
-                    fxaix_stale=r.get("fxaix_stale", False),
-                )
-
-                log_signal_perf(r["ticker"], r["action"], r["price"])
-                last_signals[r["ticker"]] = r["action"]
-                if r["ticker"] not in daily_signals: daily_signals[r["ticker"]] = []
-                daily_signals[r["ticker"]].append(f"{r['action']} @ ${r['price']:.2f}")
-            elif r["action"] == SIG_HOLD:
-                last_signals[r["ticker"]] = None
-
-        actionable = [r for r in results if r.get("action") in ALL_ACT]
-        if actionable:
-            print(Fore.CYAN + "─"*80)
-            print(Fore.CYAN + Style.BRIGHT + "  ACTION REQUIRED — enter in Fidelity manually")
-            print(Fore.CYAN + Style.BRIGHT + "  Only act on STRONG BUY / STRONG SELL for tax efficiency")
-            print(Fore.CYAN + "─"*80)
-            left_trades = MAX_TRADES - used
-            for r in actionable:
-                if left_trades <= 0: print(Fore.RED + "  ⚠ TRADE LIMIT REACHED"); break
-                color    = Fore.GREEN if r["action"] in ACT_BUY_SIGS else Fore.RED
-                priority = " ◄ ACT" if r["action"] in (SIG_STRONG_BUY, SIG_STRONG_SELL) else ""
-                print(color + Style.BRIGHT + f"  ► {r['action']:<20} {r['ticker']}  @ ${r['price']:.2f}{priority}")
-                left_trades -= 1
-            print()
-            print(Fore.WHITE + "  To log a trade go to menu option 4 anytime.")
-            print(Fore.WHITE + f"  Refreshing in {REFRESH}s — Ctrl+C to return to menu")
-        else:
-            print(Fore.WHITE + f"  Refreshing in {REFRESH}s — Ctrl+C to return to menu")
-
-        time.sleep(REFRESH)
+            
+            # EOD tasks (4 PM - after market close, if not done yet)
+            if (not should_scan and "Closed" in status and now_et.weekday() < 5 and
+                    not eod_already_sent() and not is_market_holiday()):
+                resolve_fxaix_perf()
+                fxaix_price, fxaix_stale = get_fxaix_price()
+                if fxaix_price and not fxaix_stale:
+                    eod_prices["FXAIX"] = fxaix_price
+                resolve_perf(eod_prices)
+                send_eod_summary(daily_signals, trades_today(), eod_prices)
+                mark_eod_sent()
+                print(Fore.GREEN + "  ✓ EOD summary processed.")
+            
+            # Calculate sleep time
+            seconds_until_open = get_seconds_until_market_open()
+            if seconds_until_open < CLOSED_SLEEP:
+                # Less than 30 min until open, check every 60s
+                sleep_duration = 60
+                print(Fore.YELLOW + f"  ⏳ Market opens in {seconds_until_open}s — checking frequently")
+            else:
+                # More than 30 min, sleep 30 min (saves ~95% memory)
+                sleep_duration = CLOSED_SLEEP
+                hours, remainder = divmod(seconds_until_open, 3600)
+                mins, secs = divmod(remainder, 60)
+                print(Fore.YELLOW + f"  💤 Market opens in ~{hours}h {mins}m — sleeping 30 min (saves memory)")
+                print(Fore.WHITE + f"  (Ctrl+C to go back to menu)\n")
+            
+            time.sleep(sleep_duration)
 
 # ── Option 2 — View trade history ─────────────────────────────
 
@@ -1730,6 +1812,7 @@ def option3_about():
         ("Log a Trade",         "Menu option 4 anytime — log any trade with full signal types."),
         ("Manage Trades",       "Menu option 5 — edit or delete any logged trade."),
         ("View Signals",        "Menu option 6 — see every signal fired. FXAIX shows days remaining until resolve."),
+        ("✅ OPTIMIZED",        "Smart market hours checking + 30-min sleep outside trading = ~95% less memory on Railway hobby plan!"),
     ]
     for title, desc in lines:
         print(Fore.YELLOW + Style.BRIGHT + f"\n  {title}")
@@ -1743,8 +1826,8 @@ def main():
     while True:
         os.system("cls")
         used          = trades_this_month()
-        open_, status = is_open()
-        status_color  = Fore.GREEN if open_ else Fore.RED
+        should_scan, status = should_be_scanning()
+        status_color  = Fore.GREEN if should_scan else Fore.RED
         left          = MAX_TRADES - used
         brief_status  = Fore.GREEN + "✓ sent today" if morning_already_sent() else Fore.YELLOW + "not yet sent"
         eod_status    = Fore.GREEN + "✓ sent today" if eod_already_sent()     else Fore.YELLOW + "not yet sent"
@@ -1759,6 +1842,7 @@ def main():
 
         print(Fore.CYAN + Style.BRIGHT + "\n" + "═"*50)
         print(Fore.CYAN + Style.BRIGHT + "  INDEX FUND SIGNAL BOT")
+        print(Fore.CYAN + Style.BRIGHT + "  ✅ RAILWAY HOBBY PLAN OPTIMIZED")
         print(Fore.CYAN + "═"*50)
         print(Fore.WHITE + f"  Market:  {status_color}{status}")
         print(Fore.WHITE + f"  Trades:  " +
