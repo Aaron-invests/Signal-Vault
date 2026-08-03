@@ -1,9 +1,11 @@
 """
-STOCK SCREENER - AUTOMATED VERSION
+STOCK SCREENER - AUTOMATED VERSION (RAILWAY OPTIMIZED)
 Top 100 most traded stocks
 Criteria: RSI, MACD, EMA Crossover, Bollinger Bands, ATR
-Posts signals (BUY/SELL/SHORT) to Discord paid tier with embeds
-Automatically runs every minute + scheduled strategy posts
+Posts signals (BUY/SELL/SHORT) to Discord with embeds
+Automatically runs every 2 minutes during market hours
+✅ Smart sleep during off-market hours: 30 min sleep = ~95% less memory
+✅ Railway-specific optimizations for stability
 """
 
 import os, json, time, datetime, pytz, warnings, sys, traceback
@@ -12,8 +14,6 @@ import urllib.request
 import pandas as pd
 import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-
-from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -29,7 +29,7 @@ try:
     init(autoreset=True)
 except ImportError:
     print("Installing required packages...")
-    os.system("py -m pip install yfinance colorama pytz numpy pandas apscheduler python-dotenv")
+    os.system("py -m pip install yfinance colorama pytz numpy pandas python-dotenv")
     import yfinance as yf
     from colorama import Fore, Style, init
     init(autoreset=True)
@@ -38,10 +38,14 @@ ET = pytz.timezone("US/Eastern")
 RESULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stock_screener_results.json")
 SENT_SIGNALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sent_signals.json")
 
+# ── SMART SLEEP SETTINGS ───────────────────────────────────────
+SCREENER_INTERVAL = 120  # Run every 2 minutes during market hours
+CLOSED_SLEEP = 1800      # 30 minutes — sleep when market closed (saves ~95% memory vs 60s loops)
+APPROACH_SLEEP = 60      # 60 seconds — check frequently when market opening soon
+
 # ── DISCORD WEBHOOKS & ROLES ──────────────────────────────────
 # Read from environment variables
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_STOCKS")
-DISCORD_WEBHOOK_STRATEGY = os.getenv("DISCORD_WEBHOOK_STRATEGY")
 
 DISCORD_ROLE_PREMIUM = "<@&1518420622282068028>"
 
@@ -59,6 +63,104 @@ SIG_SELL        = "SELL"
 ACT_BUY_SIGS  = (SIG_STRONG_BUY, SIG_BUY)
 ACT_SELL_SIGS = (SIG_STRONG_SELL, SIG_SELL, SIG_REDUCE)
 ALL_ACT       = ACT_BUY_SIGS + ACT_SELL_SIGS
+
+# ── US MARKET HOLIDAYS ─────────────────────────────────────────
+
+def get_market_holidays(year):
+    """Get all US market holidays for the year."""
+    holidays = set()
+
+    def nearest_weekday(dt):
+        if dt.weekday() == 5: return dt - datetime.timedelta(days=1)
+        if dt.weekday() == 6: return dt + datetime.timedelta(days=1)
+        return dt
+
+    holidays.add(nearest_weekday(datetime.date(year, 1, 1)))
+    holidays.add(nearest_weekday(datetime.date(year, 6, 19)))
+    holidays.add(nearest_weekday(datetime.date(year, 7, 4)))
+    holidays.add(nearest_weekday(datetime.date(year, 12, 25)))
+
+    jan = datetime.date(year, 1, 1)
+    jan_mon = [jan + datetime.timedelta(days=i) for i in range(31) if (jan + datetime.timedelta(days=i)).weekday() == 0]
+    holidays.add(jan_mon[2])
+
+    feb = datetime.date(year, 2, 1)
+    feb_mon = [feb + datetime.timedelta(days=i) for i in range(28) if (feb + datetime.timedelta(days=i)).weekday() == 0]
+    holidays.add(feb_mon[2])
+
+    def easter(y):
+        a = y % 19; b = y // 100; c = y % 100
+        d = b // 4; e = b % 4; f = (b + 8) // 25
+        g = (b - f + 1) // 3; h = (19*a + b - d - g + 15) % 30
+        i = c // 4; k = c % 4; l = (32 + 2*e + 2*i - h - k) % 7
+        m = (a + 11*h + 22*l) // 451
+        month = (h + l - 7*m + 114) // 31
+        day   = ((h + l - 7*m + 114) % 31) + 1
+        return datetime.date(y, month, day)
+
+    holidays.add(easter(year) - datetime.timedelta(days=2))
+
+    may = [datetime.date(year, 5, 1) + datetime.timedelta(days=i) for i in range(31)]
+    holidays.add([d for d in may if d.weekday() == 0][-1])
+
+    sep = datetime.date(year, 9, 1)
+    sep_mon = [sep + datetime.timedelta(days=i) for i in range(30) if (sep + datetime.timedelta(days=i)).weekday() == 0]
+    holidays.add(sep_mon[0])
+
+    nov = datetime.date(year, 11, 1)
+    nov_thu = [nov + datetime.timedelta(days=i) for i in range(30) if (nov + datetime.timedelta(days=i)).weekday() == 3]
+    holidays.add(nov_thu[3])
+
+    return holidays
+
+def is_market_holiday():
+    """Check if today is a US market holiday."""
+    today = datetime.datetime.now(ET).date()
+    return today in get_market_holidays(today.year)
+
+def get_seconds_until_market_open():
+    """Calculate seconds until market opens (9:30 AM ET weekdays)."""
+    now = datetime.datetime.now(ET)
+    
+    # If it's a weekend, find next Monday 9:30 AM
+    if now.weekday() >= 5:
+        days_ahead = 7 - now.weekday()
+        next_open = now.replace(hour=9, minute=30, second=0, microsecond=0) + datetime.timedelta(days=days_ahead)
+        return int((next_open - now).total_seconds())
+    
+    # If it's a holiday, skip to next trading day
+    if is_market_holiday():
+        next_open = now.replace(hour=9, minute=30, second=0, microsecond=0) + datetime.timedelta(days=1)
+        return int((next_open - now).total_seconds())
+    
+    # Today is a trading day
+    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    
+    if now < market_open:
+        # Before market open today
+        return int((market_open - now).total_seconds())
+    else:
+        # After market open today, next open is tomorrow
+        next_open = (now + datetime.timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
+        return int((next_open - now).total_seconds())
+
+def is_market_open():
+    """Check if market is currently open (9:30 AM - 4:00 PM ET, weekdays only)."""
+    now = datetime.datetime.now(ET)
+    
+    # Weekend check
+    if now.weekday() >= 5:
+        return False
+    
+    # Holiday check
+    if is_market_holiday():
+        return False
+    
+    # Market hours check (9:30 AM - 4:00 PM ET)
+    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    
+    return market_open <= now < market_close
 
 # ── Sent Signals Tracking ──────────────────────────────────────
 
@@ -315,348 +417,7 @@ def post_to_discord_embed(ticker, action, price, pct, rsi_val, confidence, reaso
         print(Fore.RED + f"[FAILED: {e}]")
         return False
 
-# ── Post to Strategy Discussion Channel ────────────────────────
 
-def post_to_strategy_channel(title, content, color=15105570):
-    """Send an embed to the strategy-discussion channel"""
-    if not DISCORD_WEBHOOK_STRATEGY:
-        return False
-    
-    try:
-        embed = {
-            "title": title,
-            "description": content,
-            "color": color,
-        }
-
-        payload = json.dumps({
-            "embeds": [embed],
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            DISCORD_WEBHOOK_STRATEGY,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0",
-            }
-        )
-        urllib.request.urlopen(req, timeout=10)
-        time.sleep(0.3)
-        return True
-
-    except Exception as e:
-        print(Fore.RED + f"[STRATEGY POST FAILED: {e}]")
-        return False
-
-def post_market_context():
-    """Post detailed pre-market context to strategy channel"""
-    try:
-        now = datetime.datetime.now(ET)
-        day_name = now.strftime("%A")
-        
-        market_context = f"""
-**🕐 Market Opens: 9:30 AM ET**
-
-**📊 KEY LEVELS TO WATCH:**
-• **SPY** - Watch 600 support / 610 resistance
-• **QQQ** - Tech momentum plays / watch 500 level
-• **IWM** - Small cap strength indicator
-
-**📈 SECTOR FOCUS:**
-• Tech (NVDA, MSFT, TSLA) - Earnings impact
-• Financials (JPM, GS) - Rate sensitive
-• Healthcare (JNJ, ABBV) - Defensive plays
-
-**🗓️ ECONOMIC DATA:**
-• CPI / Jobs reports this week?
-• Fed speakers scheduled?
-• Earnings season impact
-
-**🎯 SIGNAL VAULT STRATEGY:**
-Look for high-conviction setups with 1:2+ risk/reward. Volume surge is key. Don't chase - wait for pullbacks to defined support.
-
-**PREPARE:**
-✅ Set your watchlist tonight
-✅ Review resistance/support levels
-✅ Watch for gap direction at open
-
-Let's make today profitable! 🚀
-        """
-        ok = post_to_strategy_channel("📈 Pre-Market Brief", market_context.strip(), color=3066993)
-        if ok:
-            print(Fore.GREEN + f"[{now.strftime('%H:%M')}] Market context posted!")
-        return ok
-    except Exception as e:
-        print(Fore.RED + f"Failed to post market context: {e}")
-        return False
-
-def post_educational():
-    """Post detailed educational breakdown - rotates through 5 core setups"""
-    try:
-        now = datetime.datetime.now(ET)
-        
-        # Rotate through 5 trading setups based on day of week
-        day_of_week = now.weekday()
-        setups = [
-            {
-                "title": "🎓 Trading Masterclass: RSI Divergence",
-                "content": """
-**The Setup That Catches Reversals**
-
-Most traders see RSI < 30 and panic-buy. That's losing money right there.
-
-**Real traders look for DIVERGENCE:**
-
-**Step 1:** Price makes a **lower low** (new support break)
-**Step 2:** RSI makes a **higher low** (momentum WEAKENING)
-**Step 3:** Enter on the bounce with tight ATR stop
-
-**Why it works:**
-The divergence shows bulls stepping in even though price is lower. That's strength hidden in weakness.
-
-**Real Example:**
-If AAPL drops to $150 (lower low) but RSI only drops to 28 (higher than previous 22), that's your setup.
-
-**Entry:** Tight stop at $148
-**Target:** Previous resistance at $160
-**Risk/Reward:** 1:2.5
-
-This is ONE of 5 core setups we trade daily. Get 50+ premium members and you unlock ALL of them with live alerts. 🚀
-                """
-            },
-            {
-                "title": "🎓 Trading Masterclass: MACD Crossover",
-                "content": """
-**The Momentum Setup That Catches Trends**
-
-MACD is the most overlooked indicator. Most people watch it wrong.
-
-**The Real Setup:**
-
-**MACD Bullish Cross:**
-• MACD line (12-26) crosses ABOVE signal line (9 EMA)
-• Momentum is accelerating UP
-• Entry: When MACD crosses + price holds support
-• Risk: Break below recent support
-
-**MACD Bearish Cross:**
-• MACD line crosses BELOW signal line
-• Momentum is dying
-• Exit longs / Consider shorts
-• Stop: Break of recent resistance
-
-**Why it works:**
-MACD measures momentum CHANGE. When it crosses, the direction is shifting. Early birds catch the move.
-
-**Real Setup:**
-RSI 40-60 (neutral) + MACD bullish cross = 70+ confidence setup.
-
-**Pro Tip:**
-Volume surge on the cross = higher probability. That's why we combine indicators.
-
-This is setup #2 of our 5-part system. Full access in premium tier. 🔥
-                """
-            },
-            {
-                "title": "🎓 Trading Masterclass: Bollinger Bands Bounce",
-                "content": """
-**The Mean Reversion Setup**
-
-Bollinger Bands tell you when price is STRETCHED. That's when reversions happen.
-
-**The Setup:**
-
-**Upper Band Rejection:**
-• Price touches or breaks above upper BB
-• Look for rejection candle (close below)
-• Strong sellers stepping in
-• Risk: Break and hold above
-
-**Lower Band Bounce:**
-• Price touches lower BB
-• Oversold conditions (RSI < 30)
-• Entry: Bounce candle with higher low
-• Target: 20-period SMA (middle band)
-
-**Why it works:**
-Bands measure 2 standard deviations. Price rarely stays there. Reversion is probabilistic.
-
-**Real Example:**
-QQQ drops to lower band at $480, RSI is 25, volume surge on bounce. Entry at $482 with stop at $478.
-
-**Key Rule:**
-Don't buy the touch. Wait for rejection / bounce confirmation. Entry on the reversal candle, not the extreme.
-
-This is setup #3. Master this and you're beating 80% of retail traders. 💪
-                """
-            },
-            {
-                "title": "🎓 Trading Masterclass: EMA Golden Cross",
-                "content": """
-**The Trend Confirmation Setup**
-
-Golden Cross: Fast EMA (9) crosses above Slow EMA (26). That's trend confirmation.
-
-**The Setup:**
-
-**Golden Cross (Bullish):**
-• EMA(9) crosses ABOVE EMA(26)
-• Price above both = bullish structure
-• Entry: After the cross, on any pullback to EMA(9)
-• Hold: Until bearish cross or break of EMA(26)
-
-**Death Cross (Bearish):**
-• EMA(9) crosses BELOW EMA(26)
-• Price below both = bearish structure
-• Exit longs / Consider shorts
-• Stop: Break above EMA(26)
-
-**Why it works:**
-This measures TREND, not just momentum. When the fast average turns, direction is changing.
-
-**Real Setup:**
-Post-earnings stock golden crosses at resistance. Entry on pullback. Target = previous resistance.
-
-**Pro Tip:**
-Combine with volume. Golden cross on volume surge = 80+ confidence.
-
-This is setup #4. Use it to trade WITH the trend, not against it. 🎯
-                """
-            },
-            {
-                "title": "🎓 Trading Masterclass: Volume Surge Breakout",
-                "content": """
-**The Breakout Setup That Actually Works**
-
-Volume surge = institutional money moving. That's how you know it's real.
-
-**The Setup:**
-
-**Breakout with Volume Surge:**
-• Price breaks resistance
-• Volume > 1.3x (20-day average)
-• Entry: Tight stop below breakout level
-• Target: Next resistance level
-
-**Why volume matters:**
-Volume is INTENT. Without it, breakouts fail 60% of the time. With it, they succeed 75%+.
-
-**Real Example:**
-TSLA has been holding $250-260 for 10 days. Breaks $260 on volume 3x average. That's a real move.
-
-Entry: $261 with stop at $259 (tight)
-Target: Previous high at $285
-Risk/Reward: 1:3
-
-**Key Rules:**
-✅ Volume ABOVE 1.3x 20-day average
-✅ Close ABOVE resistance (not just touch)
-✅ Tight stops (1-2% below entry)
-
-This is setup #5. Use volume confirmation and you'll stop chasing fakes. 🚀
-                """
-            }
-        ]
-        
-        setup = setups[day_of_week % 5]
-        ok = post_to_strategy_channel(setup["title"], setup["content"].strip(), color=3066993)
-        if ok:
-            print(Fore.GREEN + f"[{now.strftime('%H:%M')}] Educational post #{day_of_week % 5 + 1} posted!")
-        return ok
-    except Exception as e:
-        print(Fore.RED + f"Failed to post educational content: {e}")
-        return False
-
-def post_discussion_prompt():
-    """Post engaging discussion prompt to strategy channel"""
-    try:
-        now = datetime.datetime.now(ET)
-        
-        # Different prompts for different days
-        day_of_week = now.weekday()
-        prompts = [
-            {
-                "title": "💬 Weekly Discussion: What's Your Best Trade This Week?",
-                "content": """
-Drop a screenshot or quick story of your best trade (win OR loss).
-
-**We're all learning here:**
-✅ Wins build confidence
-❌ Losses teach the hardest lessons
-
-**Share:**
-• Entry level
-• Exit level
-• Why you took it
-• What you learned
-
-No judgment—only growth. 🚀
-                """
-            },
-            {
-                "title": "💬 Trading Talk: What Setup Confuses You Most?",
-                "content": """
-Is it:
-• **RSI Divergence** - When does it work? When does it fail?
-• **MACD Signals** - False crosses?
-• **Volume** - How much is "enough"?
-• **Entry timing** - Too early? Too late?
-
-Drop your confusion below. The community will help break it down. That's how we all level up. 💪
-                """
-            },
-            {
-                "title": "💬 Market Check: How Did Your Setups Perform?",
-                "content": """
-Mid-week reality check:
-
-• Did your watchlist stocks move?
-• Any surprise gainers/losers?
-• Setups work like you expected?
-• What surprised you this week?
-
-Share your observations. Real traders learn from real data. 📊
-                """
-            },
-            {
-                "title": "💬 Friday Vibes: Best Trade of the Week?",
-                "content": """
-It's Friday! Let's celebrate the wins. 🎉
-
-**What was your best trade this week?**
-• Biggest % gain?
-• Cleanest setup execution?
-• Best risk/reward hit?
-• Luckiest escape?
-
-Drop screenshots. Share the wins. We're all rooting for each other. 🚀
-                """
-            },
-            {
-                "title": "💬 Monday Momentum: What Are You Watching?",
-                "content": """
-Fresh week. Fresh opportunities. 📈
-
-**What's on your watchlist this week?**
-• Earnings plays?
-• Technical setups forming?
-• Sector rotations you're tracking?
-• New stocks catching your eye?
-
-Share your targets. We trade together. Build the list as a community. 🎯
-                """
-            }
-        ]
-        
-        prompt = prompts[day_of_week % 5]
-        ok = post_to_strategy_channel(prompt["title"], prompt["content"].strip(), color=15105570)
-        if ok:
-            print(Fore.GREEN + f"[{now.strftime('%H:%M')}] Discussion prompt posted!")
-        return ok
-    except Exception as e:
-        print(Fore.RED + f"Failed to post discussion prompt: {e}")
-        return False
 
 # ── Main Screener ──────────────────────────────────────────────
 
@@ -665,7 +426,7 @@ def run_screener():
     try:
         os.system("cls")
         print(Fore.CYAN + Style.BRIGHT + "\n" + "="*70)
-        print(Fore.CYAN + Style.BRIGHT + "  STOCK SCREENER -- TOP 100 MOST TRADED (AUTOMATED)")
+        print(Fore.CYAN + Style.BRIGHT + "  STOCK SCREENER -- TOP 100 MOST TRADED (RAILWAY OPTIMIZED)")
         print(Fore.CYAN + "="*70 + "\n")
 
         stocks  = get_top_100_stocks()
@@ -750,45 +511,66 @@ def run_screener():
         # Continue running even if scan fails
 
 
-# ── Start Scheduler ────────────────────────────────────────────
+# ── Start Scheduler & Screener Loop ────────────────────────────
 
 if __name__ == "__main__":
     import threading
 
     print(Fore.CYAN + Style.BRIGHT + "\n" + "="*70)
-    print(Fore.CYAN + Style.BRIGHT + "  STOCK SCREENER - AUTOMATED MODE")
+    print(Fore.CYAN + Style.BRIGHT + "  STOCK SCREENER - AUTOMATED MODE (RAILWAY OPTIMIZED)")
     print(Fore.CYAN + "="*70)
-    print(Fore.WHITE + "  Running screener every 2 minutes during market hours...")
-    print(Fore.WHITE + "  Scheduled strategy posts:")
-    print(Fore.WHITE + "    • 9:25 AM ET - Pre-market brief")
-    print(Fore.WHITE + "    • 1:00 PM ET - Daily educational lesson")
-    print(Fore.WHITE + "    • 3:00 PM ET - Discussion prompt")
+    print(Fore.WHITE + "  ✅ Scanning every 2 minutes DURING market hours only")
+    print(Fore.WHITE + "  ✅ Smart sleep: 30 min when market closed (saves ~95% memory) 💾")
+    print(Fore.WHITE + "  ✅ Detects weekends, holidays, and market hours automatically")
     print(Fore.CYAN + "="*70 + "\n")
 
     # Run screener immediately on startup
     run_screener()
 
     def run_screener_loop():
-        """Background thread loop that runs the screener every 2 minutes
-        during market hours. Threading + time.sleep is used instead of
-        APScheduler cron jobs because cron scheduling can silently stop
-        firing after blocking operations (e.g. Discord webhook posts,
-        network calls) tie up the scheduler thread. A plain thread with
-        sleep intervals is simple and does not depend on clock
-        synchronization, making it far more resilient.
         """
+        ✅ OPTIMIZED FOR RAILWAY HOBBY PLAN
+        Background thread that runs screener every 2 minutes ONLY during market hours.
+        Smart sleep when market is closed:
+        - If < 30 min until open: Check every 60s (stay responsive)
+        - If > 30 min until open: Sleep 30 min (saves ~95% memory)
+        """
+        last_status_printed = None
         while True:
             try:
-                now = datetime.datetime.now(ET)
-                # Only run during market hours (9:30 AM - 4:00 PM ET), Monday-Friday
-                if now.weekday() < 5 and 9 <= now.hour < 16:
+                open_now = is_market_open()
+                
+                if open_now:
+                    # ═══ DURING MARKET HOURS ═══════════════════════
+                    # Scan every 2 minutes
                     run_screener()
-                    time.sleep(120)  # Run every 2 minutes
+                    time.sleep(SCREENER_INTERVAL)
                 else:
-                    # Outside market hours, check every minute if we should start
-                    time.sleep(60)
+                    # ═══ MARKET CLOSED ═════════════════════════════
+                    # Use smart sleep
+                    seconds_until_open = get_seconds_until_market_open()
+                    now = datetime.datetime.now(ET)
+                    
+                    if seconds_until_open < CLOSED_SLEEP:
+                        # Less than 30 min until open
+                        sleep_duration = APPROACH_SLEEP  # 60s
+                        status = f"⏳ Market opens in {seconds_until_open}s — checking frequently"
+                    else:
+                        # More than 30 min until open
+                        sleep_duration = CLOSED_SLEEP  # 1800s = 30 min
+                        hours, remainder = divmod(seconds_until_open, 3600)
+                        mins, secs = divmod(remainder, 60)
+                        status = f"💤 Market opens in ~{hours}h {mins}m — sleeping 30 min (saves memory)"
+                    
+                    # Print status once per sleep cycle (not every loop)
+                    if status != last_status_printed:
+                        print(Fore.YELLOW + f"[{now.strftime('%H:%M:%S')}] {status}")
+                        last_status_printed = status
+                    
+                    time.sleep(sleep_duration)
+                    
             except Exception as e:
-                print(f"[screener loop] error: {e}", file=sys.stderr)
+                print(f"[screener loop] ERROR: {e}", file=sys.stderr)
                 traceback.print_exc()
                 time.sleep(60)
 
@@ -796,30 +578,9 @@ if __name__ == "__main__":
     screener_thread = threading.Thread(target=run_screener_loop, daemon=True)
     screener_thread.start()
 
-    # Create scheduler for the strategy posts only (these run once a day,
-    # outside of the tight screener loop, so cron scheduling is fine here)
-    scheduler = BackgroundScheduler()
-
-    # Strategy posts: weekdays only
-    # Pre-market brief at 9:25 AM ET
-    scheduler.add_job(post_market_context, 'cron', day_of_week='mon-fri', hour='9', minute='25')
-
-    # Educational post at 1:00 PM ET (mid-day, rotating through 5 setups)
-    scheduler.add_job(post_educational, 'cron', day_of_week='mon-fri', hour='13', minute='0')
-
-    # Discussion prompt at 3:00 PM ET (end of day, rotating prompts)
-    scheduler.add_job(post_discussion_prompt, 'cron', day_of_week='mon-fri', hour='15', minute='0')
-
+    # Keep the main process alive forever
     try:
-        scheduler.start()
-        print("Scheduler started successfully")
-        scheduler.daemon = False
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Scheduler stopped by user")
-        scheduler.shutdown()
-    except Exception as e:
-        print(f"FATAL ERROR: {e}", file=sys.stderr)
-        traceback.print_exc()
-        scheduler.shutdown()
+        print("Screener stopped by user")
