@@ -60,8 +60,8 @@ MIN_MULTIPLIER = 2.0
 ATH_DROP_PERCENT = 25
 WIN_TIMEOUT_HOURS = 2
 
-# RATE LIMITING: Max 15 signals per hour (prevent spam nights)
-MAX_SIGNALS_PER_HOUR = 15
+# RATE LIMITING: Max 8 signals per hour (prevent spam nights)
+MAX_SIGNALS_PER_HOUR = 8
 SIGNALS_THIS_HOUR = []
 
 # ─────────────────────────────
