@@ -2,10 +2,10 @@
 Signal Vault - Meme Coin Scanner with Auto Win Tracking (OPTIMIZED)
 
 Fixes:
-- Fetches TRENDING tokens instead of ALL tokens (~10x fewer API calls)
-- Separates signal scanning (every 5m) from win tracking (every 30s)
+- Fetches LATEST tokens and caps at 50 (~10x fewer API calls)
+- Separates signal scanning (every 5m) from win tracking (every 5m)
 - Caches pair data to avoid redundant requests
-- Respects rate limits properly
+- Rate limits to 8 signals/hour
 
 This should cut your Railway usage by 80%+
 """
@@ -163,20 +163,20 @@ def save_tracked_wins(tracked):
 
 def get_trending_tokens():
     """
-    OPTIMIZED: Fetch TRENDING tokens instead of ALL profiles.
-    Returns ~20-50 tokens instead of 500+.
+    Fetch latest token profiles and cap results.
+    Returns ~50 tokens instead of 500+.
     """
     try:
         r = requests.get(
-            "https://api.dexscreener.com/token-profiles/trending/v1",
+            "https://api.dexscreener.com/token-profiles/latest/v1",
             timeout=10
         )
         r.raise_for_status()
         tokens = r.json()
-        # Cap at 50 max to further reduce API calls
+        # Cap at 50 max to reduce API calls
         return tokens[:50] if tokens else []
     except Exception as e:
-        print(f"[error] fetching trending tokens: {e}")
+        print(f"[error] fetching latest tokens: {e}")
         return []
 
 def get_pair_data(chain_id, token_address):
@@ -405,7 +405,6 @@ def check_and_update_wins(tracked_wins):
     """
     Check tracked wins and post proof when conditions are met.
     DELETE from tracking immediately after posting.
-    Runs every 30s but won't hammer API since we delete posted tokens.
     """
     tokens_to_delete = []
     
@@ -477,8 +476,8 @@ def check_and_update_wins(tracked_wins):
 def scan_for_signals(seen, tracked_wins):
     """
     Scan for new signals. Runs every 5 minutes.
-    Fetches TRENDING tokens only (~20-50 instead of 500+).
-    Rate limited to MAX_SIGNALS_PER_HOUR to prevent spam.
+    Fetches latest tokens, capped at 50.
+    Rate limited to 8 signals/hour to prevent spam.
     """
     profiles = get_trending_tokens()
     new_alerts = 0
@@ -536,7 +535,7 @@ def scan_for_signals(seen, tracked_wins):
     return new_alerts, tracked_wins
 
 # ─────────────────────────────
-# MAIN LOOP (SEPARATED)
+# MAIN LOOP
 # ─────────────────────────────
 
 def main():
@@ -547,9 +546,9 @@ def main():
     tracked_wins = load_tracked_wins()
     
     print(f"✓ Meme scanner OPTIMIZED")
-    print(f"  • Signal scan: every {SIGNAL_SCAN_INTERVAL_SECONDS}s (trending tokens only)")
+    print(f"  • Signal scan: every {SIGNAL_SCAN_INTERVAL_SECONDS}s (latest tokens, cap 50)")
     print(f"  • Win check: every {WIN_CHECK_INTERVAL_SECONDS}s (separate loop)")
-    print(f"  • Rate limit: {MAX_SIGNALS_PER_HOUR} signals/hour (prevent spam)")
+    print(f"  • Rate limit: {MAX_SIGNALS_PER_HOUR} signals/hour")
     print(f"  • Memory: auto-cleanup seen_tokens + tracked_wins >48h old")
     print(f"  • Starting with {len(seen)} seen tokens, {len(tracked_wins)} tracked wins\n")
 
