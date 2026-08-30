@@ -169,7 +169,7 @@ def get_trending_tokens():
     try:
         r = requests.get(
             "https://api.dexscreener.com/token-profiles/latest/v1",
-            timeout=10
+            timeout=20
         )
         r.raise_for_status()
         tokens = r.json()
