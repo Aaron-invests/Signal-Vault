@@ -193,7 +193,7 @@ def get_pair_data(chain_id, token_address):
     try:
         r = requests.get(
             f"https://api.dexscreener.com/latest/dex/tokens/{token_address}",
-            timeout=10,
+            timeout=20,
         )
         r.raise_for_status()
         pairs = r.json().get("pairs") or []
