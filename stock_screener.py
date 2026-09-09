@@ -380,7 +380,6 @@ def post_to_discord_embed(ticker, action, price, pct, rsi_val, confidence, reaso
             {"name": "📊 Daily %",     "value": f"**{pct:+.2f}%**",     "inline": True},
             {"name": "RSI",            "value": f"**{rsi_val:.1f}**",   "inline": True},
             {"name": "🎯 Confidence",  "value": f"**{confidence}**",    "inline": True},
-            {"name": "📋 Reason",      "value": reason,                 "inline": False},
         ]
 
         if target and stop_loss and rr:
