@@ -5,7 +5,8 @@ Fixes:
 - Fetches LATEST tokens and caps at 50 (~10x fewer API calls)
 - Separates signal scanning (every 5m) from win tracking (every 5m)
 - Caches pair data to avoid redundant requests
-- Rate limits to 8 signals/hour
+- Rate limits to 8 signals/hour per chain (Solana + Robinhood)
+- Labels every alert and proof post with its chain
 
 This should cut your Railway usage by 80%+
 """
@@ -37,7 +38,11 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_MEME")
 DISCORD_WEBHOOK_PROOF = os.getenv("DISCORD_WEBHOOK_PROOF")
 PREMIUM_ROLE_ID = "1518420622282068028"
 
-CHAINS = ["solana"]
+CHAINS = ["solana", "robinhood"]  # CHANGED: added robinhood
+CHAIN_LABELS = {                  # CHANGED: display names for labels
+    "solana": "Solana",
+    "robinhood": "Robinhood Chain",
+}
 
 MIN_LIQUIDITY_USD = 15000
 MIN_VOLUME_24H_USD = 25000
@@ -60,9 +65,9 @@ MIN_MULTIPLIER = 1.5
 ATH_DROP_PERCENT = 25
 WIN_TIMEOUT_HOURS = 2
 
-# RATE LIMITING: Max 8 signals per hour (prevent spam nights)
-MAX_SIGNALS_PER_HOUR = 8
-SIGNALS_THIS_HOUR = []
+# RATE LIMITING: Max 8 signals per hour PER CHAIN (prevent spam nights)
+MAX_SIGNALS_PER_CHAIN_PER_HOUR = 8   # CHANGED: per-chain limit
+SIGNALS_THIS_HOUR = []               # CHANGED: now stores (timestamp, chain_id)
 
 # ─────────────────────────────
 # CACHING (reduce redundant API calls)
@@ -104,7 +109,7 @@ def save_seen(seen):
     if len(seen) > 15000:
         print(f"[maintenance] seen_tokens grew to {len(seen)}, clearing to free memory")
         seen = set()
-    
+
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen), f)
 
@@ -115,7 +120,7 @@ def load_tracked_wins():
                 data = json.load(f)
                 now = datetime.now(timezone.utc)
                 cleaned = {}
-                
+
                 for key, val in data.items():
                     val["signal_time"] = datetime.fromisoformat(val["signal_time"])
                     val["ath_time"] = datetime.fromisoformat(val["ath_time"])
@@ -123,19 +128,19 @@ def load_tracked_wins():
                         val["entry_mc"] = val.get("entry_price", 0)
                     if "ath_mc" not in val:
                         val["ath_mc"] = val.get("ath_price", 0)
-                    
+
                     # CLEANUP: Remove tracked wins older than 48 hours
                     # (they should have posted proof or timed out by now)
                     age = now - val["signal_time"]
                     if age > timedelta(hours=48):
                         print(f"[cleanup] removing stale tracked win {val['symbol']} (age: {age})")
                         continue
-                    
+
                     cleaned[key] = val
-                
+
                 if len(cleaned) != len(data):
                     print(f"[cleanup] removed {len(data) - len(cleaned)} old tracked wins from memory")
-                
+
                 return cleaned
         except:
             return {}
@@ -185,11 +190,11 @@ def get_pair_data(chain_id, token_address):
     If we've fetched this token in the last 60 seconds, return cached data.
     """
     key = f"{chain_id}:{token_address}"
-    
+
     # Check cache first
     if key in _pair_data_cache:
         return _pair_data_cache[key]
-    
+
     try:
         r = requests.get(
             f"https://api.dexscreener.com/latest/dex/tokens/{token_address}",
@@ -201,11 +206,11 @@ def get_pair_data(chain_id, token_address):
         if not pairs:
             return None
         best_pair = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd", 0))
-        
+
         # Cache the result
         _pair_data_cache[key] = best_pair
         _cache_timestamp[key] = time.time()
-        
+
         return best_pair
     except Exception as e:
         print(f"[error] fetching pair data for {token_address}: {e}")
@@ -272,33 +277,34 @@ def get_age_string(created_ms):
     else:
         return f"{int(age_seconds/86400)}d"
 
-def check_rate_limit():
+def check_rate_limit(chain_id):
     """
-    Check if we've exceeded max signals per hour.
-    Returns True if OK to send, False if rate limited.
+    Check if we can send another signal for this chain this hour.
+    Returns True if OK to send, False if this chain hit its hourly cap.
     """
     global SIGNALS_THIS_HOUR
     now = time.time()
-    
+
     # Remove signals older than 1 hour
-    SIGNALS_THIS_HOUR = [ts for ts in SIGNALS_THIS_HOUR if now - ts < 3600]
-    
-    if len(SIGNALS_THIS_HOUR) >= MAX_SIGNALS_PER_HOUR:
+    SIGNALS_THIS_HOUR = [(ts, c) for ts, c in SIGNALS_THIS_HOUR if now - ts < 3600]  # CHANGED
+
+    chain_count = sum(1 for _, c in SIGNALS_THIS_HOUR if c == chain_id)  # CHANGED
+    if chain_count >= MAX_SIGNALS_PER_CHAIN_PER_HOUR:
         return False
     return True
 
-def record_signal():
-    """Record that we sent a signal (for rate limiting)."""
+def record_signal(chain_id):
+    """Record that we sent a signal on this chain (for rate limiting)."""
     global SIGNALS_THIS_HOUR
-    SIGNALS_THIS_HOUR.append(time.time())
+    SIGNALS_THIS_HOUR.append((time.time(), chain_id))  # CHANGED
 
-def send_alert(pair):
+def send_alert(pair, chain_id):
     """Send signal alert to main webhook."""
     base = pair.get("baseToken", {})
     name = base.get("name", "Unknown")
     symbol = base.get("symbol", "???")
     address = base.get("address", "?")
-    price = pair.get("priceUsd", "?")
+    chain_label = CHAIN_LABELS.get(chain_id, chain_id)  # CHANGED
     liq = (pair.get("liquidity") or {}).get("usd", 0) or 0
     vol = (pair.get("volume") or {}).get("h24", 0) or 0
     change_5m = (pair.get("priceChange") or {}).get("m5", 0) or 0
@@ -318,10 +324,11 @@ def send_alert(pair):
         color = 0x9b59b6
 
     embed = {
-        "title": f"🚨 {name} (${symbol})",
+        "title": f"🚨 {name} (${symbol}) • {chain_label}",  # CHANGED: chain in title
         "url": url,
         "color": color,
         "fields": [
+            {"name": "Chain", "value": chain_label, "inline": True},  # CHANGED
             {"name": "Contract Address", "value": f"`{address}`", "inline": False},
             {"name": "Market Cap", "value": format_number(pair.get('marketCap', 0) or 0), "inline": True},
             {"name": "5m Pump", "value": f"{change_5m:+.1f}% {'🔥' if change_5m >= 10 else ''}", "inline": True},
@@ -364,19 +371,21 @@ def send_alert(pair):
     try:
         r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
         r.raise_for_status()
-        print(f"[alert sent] {symbol}")
+        print(f"[alert sent] {symbol} ({chain_label})")  # CHANGED
     except Exception as e:
         print(f"[error] sending webhook: {e}")
 
-def send_proof_post(symbol, entry_mc, exit_mc, multiplier):
+def send_proof_post(symbol, chain_id, entry_mc, exit_mc, multiplier):  # CHANGED: chain_id param
     """Send proof to proof channel."""
+    chain_label = CHAIN_LABELS.get(chain_id, chain_id)  # CHANGED
     entry_mc_str = format_number(entry_mc)
     exit_mc_str = format_number(exit_mc)
-    
+
     embed = {
-        "title": f"✅ WIN: {symbol}",
+        "title": f"✅ WIN: {symbol} • {chain_label}",  # CHANGED: chain in title
         "color": 0x00ff00,
         "fields": [
+            {"name": "Chain", "value": chain_label, "inline": False},  # CHANGED
             {"name": "Multiplier", "value": f"**{multiplier:.2f}X**", "inline": False},
             {"name": "─────────────", "value": "─────────────", "inline": False},
             {"name": "Entry MC", "value": f"**{entry_mc_str}**", "inline": False},
@@ -393,7 +402,7 @@ def send_proof_post(symbol, entry_mc, exit_mc, multiplier):
     try:
         r = requests.post(DISCORD_WEBHOOK_PROOF, json=payload, timeout=10)
         r.raise_for_status()
-        print(f"[proof posted] {symbol} - {multiplier:.2f}X")
+        print(f"[proof posted] {symbol} ({chain_label}) - {multiplier:.2f}X")  # CHANGED
     except Exception as e:
         print(f"[error] sending proof: {e}")
 
@@ -407,25 +416,25 @@ def check_and_update_wins(tracked_wins):
     DELETE from tracking immediately after posting.
     """
     tokens_to_delete = []
-    
+
     for token_key, win_data in list(tracked_wins.items()):
         chain_id, token_address = token_key.split(":")
         pair = get_pair_data(chain_id, token_address)
-        
+
         if not pair:
             continue
-        
+
         current_price = float(pair.get("priceUsd", 0))
         if current_price <= 0:
             continue
-        
+
         entry_price = win_data["entry_price"]
         entry_mc = win_data["entry_mc"]
         ath_price = win_data["ath_price"]
         ath_mc = win_data["ath_mc"]
         signal_time = win_data["signal_time"]
         current_mc = float(pair.get("marketCap", 0) or 0)
-        
+
         # Update ATH if new high
         if current_price > ath_price:
             win_data["ath_price"] = current_price
@@ -434,39 +443,40 @@ def check_and_update_wins(tracked_wins):
                 win_data["ath_mc"] = current_mc
                 ath_mc = current_mc
             win_data["ath_time"] = datetime.now(timezone.utc)
-        
+
         should_post = False
-        
+
         # Check 25% drop from ATH
         drop_percent = ((ath_price - current_price) / ath_price) * 100
         if drop_percent >= ATH_DROP_PERCENT:
             should_post = True
-        
+
         # Check 2-hour timeout
         time_elapsed = datetime.now(timezone.utc) - signal_time
         if time_elapsed >= timedelta(hours=WIN_TIMEOUT_HOURS):
             should_post = True
-        
+
         if should_post:
             exit_mc = win_data["ath_mc"]
             final_multiplier = exit_mc / entry_mc if entry_mc > 0 else 0
-            
+
             # Only post if it's actually a win (2x+)
             if final_multiplier >= MIN_MULTIPLIER:
                 send_proof_post(
                     symbol=win_data["symbol"],
+                    chain_id=chain_id,       # CHANGED
                     entry_mc=entry_mc,
                     exit_mc=exit_mc,
                     multiplier=final_multiplier
                 )
-            
+
             # DELETE immediately after posting - stop tracking this token
             tokens_to_delete.append(token_key)
-    
+
     # Remove all posted tokens from tracking
     for token_key in tokens_to_delete:
         del tracked_wins[token_key]
-    
+
     return tracked_wins
 
 # ─────────────────────────────
@@ -477,7 +487,7 @@ def scan_for_signals(seen, tracked_wins):
     """
     Scan for new signals. Runs every 5 minutes.
     Fetches latest tokens, capped at 50.
-    Rate limited to 8 signals/hour to prevent spam.
+    Rate limited to 8 signals/hour per chain.
     """
     profiles = get_trending_tokens()
     new_alerts = 0
@@ -489,11 +499,11 @@ def scan_for_signals(seen, tracked_wins):
 
         if chain_id not in CHAINS or not address:
             continue
-        
+
         if address.startswith("http://") or address.startswith("https://"):
             continue
 
-        key = f"{chain_id}:{address}"
+        key = f"{chain_id}:{address.lower() if address.startswith('0x') else address}"
 
         if key in seen:
             continue
@@ -501,17 +511,17 @@ def scan_for_signals(seen, tracked_wins):
         pair = get_pair_data(chain_id, address)
 
         if passes_filters(pair):
-            # CHECK RATE LIMIT before sending
-            if not check_rate_limit():
-                print(f"[rate limited] {pair.get('baseToken', {}).get('symbol', '?')} - already sent {MAX_SIGNALS_PER_HOUR} this hour")
+            # CHECK RATE LIMIT for this chain before sending
+            if not check_rate_limit(chain_id):  # CHANGED
+                print(f"[rate limited] {pair.get('baseToken', {}).get('symbol', '?')} - {CHAIN_LABELS.get(chain_id, chain_id)} already sent {MAX_SIGNALS_PER_CHAIN_PER_HOUR} this hour")
                 skipped_rate_limit += 1
                 continue
-            
-            send_alert(pair)
-            record_signal()  # Record that we sent this signal
-            
+
+            send_alert(pair, chain_id)  # CHANGED
+            record_signal(chain_id)     # CHANGED
+
             symbol = pair.get("baseToken", {}).get("symbol", "???")
-            
+
             # Add to tracked wins
             tracked_wins[key] = {
                 "symbol": symbol,
@@ -523,7 +533,7 @@ def scan_for_signals(seen, tracked_wins):
                 "ath_time": datetime.now(timezone.utc),
                 "posted": False
             }
-            
+
             new_alerts += 1
             seen.add(key)
 
@@ -541,14 +551,15 @@ def scan_for_signals(seen, tracked_wins):
 def main():
     if not DISCORD_WEBHOOK_PROOF:
         print("[error] DISCORD_WEBHOOK_PROOF not set in .env")
-    
+
     seen = load_seen()
     tracked_wins = load_tracked_wins()
-    
+
     print(f"✓ Meme scanner OPTIMIZED")
+    print(f"  • Chains: {', '.join(CHAIN_LABELS.get(c, c) for c in CHAINS)}")  # CHANGED
     print(f"  • Signal scan: every {SIGNAL_SCAN_INTERVAL_SECONDS}s (latest tokens, cap 50)")
     print(f"  • Win check: every {WIN_CHECK_INTERVAL_SECONDS}s (separate loop)")
-    print(f"  • Rate limit: {MAX_SIGNALS_PER_HOUR} signals/hour")
+    print(f"  • Rate limit: {MAX_SIGNALS_PER_CHAIN_PER_HOUR} signals/hour per chain")  # CHANGED
     print(f"  • Memory: auto-cleanup seen_tokens + tracked_wins >48h old")
     print(f"  • Starting with {len(seen)} seen tokens, {len(tracked_wins)} tracked wins\n")
 
@@ -558,7 +569,7 @@ def main():
     while True:
         try:
             now = time.time()
-            
+
             # SIGNAL SCAN (every 5 minutes)
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL_SECONDS:
                 count, tracked_wins = scan_for_signals(seen, tracked_wins)
@@ -566,17 +577,17 @@ def main():
                 save_tracked_wins(tracked_wins)
                 last_signal_scan = now
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] SIGNAL SCAN: +{count} new alerts, {len(tracked_wins)} tracking (seen: {len(seen)})")
-            
+
             # WIN CHECK (every 5 minutes)
             if now - last_win_check >= WIN_CHECK_INTERVAL_SECONDS:
                 tracked_wins = check_and_update_wins(tracked_wins)
                 save_tracked_wins(tracked_wins)
                 last_win_check = now
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] WIN CHECK: {len(tracked_wins)} still tracking")
-            
+
             # Clear old cache entries
             clear_old_cache()
-            
+
             # Sleep 5 seconds to avoid tight loop
             time.sleep(5)
 
