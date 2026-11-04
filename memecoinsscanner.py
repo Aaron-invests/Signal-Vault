@@ -56,7 +56,7 @@ MIN_LIQUIDITY_FOR_VOLUME = 0.2
 SIGNAL_SCAN_INTERVAL_SECONDS = 300
 # Win tracking matches signal scan (both every 5 minutes)
 # Once a proof posts, token is deleted immediately
-WIN_CHECK_INTERVAL_SECONDS = 300
+WIN_CHECK_INTERVAL_SECONDS = 150
 
 SEEN_FILE = "seen_tokens.json"
 TRACKED_WINS_FILE = "tracked_wins.json"
